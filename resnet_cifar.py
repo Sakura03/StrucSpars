@@ -48,15 +48,22 @@ class GroupableConv2d(nn.Conv2d):
         for i in range(iters):
             idx1, idx2 = np.random.choice(self.out_channels, size=2, replace=False)
             if self.compare_loss(penalty, idx1, idx2, row=True):
-                tmp = self.P[idx1]
+                tmp = self.P[idx1].clone()
                 self.P[idx1] = self.P[idx2]
                 self.P[idx2] = tmp
             idx1, idx2 = np.random.choice(self.in_channels, size=2, replace=False)
             if self.compare_loss(penalty, idx1, idx2, row=False):
-                tmp = self.Q[idx1]
+                tmp = self.Q[idx1].clone()
                 self.Q[idx1] = self.Q[idx2]
                 self.Q[idx2] = tmp
-                
+            # if verbose:
+            #     print("Iter [%d/%d] Loss: %.3f" % (i, iters, self.compute_loss(penalty)))
+    """
+    @torch.no_grad()
+    def compute_loss(self, penalty):
+        permuted_weight_norm = self.weight_norm[self.P, :][:, self.Q]
+        return torch.sum(permuted_weight_norm * penalty)
+    """            
     def compute_regularity(self, penalty):
         shuffled_weight_norm = self.weight_norm[self.P, :][:, self.Q]
         return torch.mean(shuffled_weight_norm * penalty)

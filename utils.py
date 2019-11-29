@@ -122,7 +122,7 @@ def mask_group(model, factors, thres, logger):
             total_connections += mask.numel()
             remaining_connections += mask.sum()
             logger.info("Layer %s total connections %d (remaining %d)" % (name, mask.numel(), mask.sum()))
-    logger.info("--------------------> %d of %d connections remained, remaining rate %f<--------------------" % \
+    logger.info("--------------------> %d of %d connections remained, remaining rate %f <--------------------" % \
                (remaining_connections, total_connections, float(remaining_connections)/total_connections))
     return group_levels
 

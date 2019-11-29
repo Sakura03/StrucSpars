@@ -15,17 +15,16 @@ from thop import profile
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--print-freq', default=20, type=int, metavar='N', help='print frequency (default: 20)')
-parser.add_argument('--data', metavar='DIR', default=None, help='path to dataset')
+parser.add_argument('--data', metavar='DIR', default="/home/kai/.torch/data", help='path to dataset')
 parser.add_argument('--dataset', default="cifar100", help='dataset')
 parser.add_argument('--bs', '--batch-size', default=256, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--epochs', default=160, type=int, metavar='N', help='number of total epochs to run')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float, metavar='LR', help='initial learning rate')
-parser.add_argument('--stepsize', '--step-size', default=None, type=int, metavar='SS', help='decrease learning rate every stepsize epochs')
 parser.add_argument('--gamma', default=0.1, type=float, metavar='GM', help='decrease learning rate by gamma')
 parser.add_argument('--milestones', default=[80, 120], type=eval, help='milestones for scheduling lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float, metavar='WD', help='weight decay')
-parser.add_argument('--resume', default="", type=str, metavar='PATH', help='path to latest checkpoint')
+parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to latest checkpoint')
 parser.add_argument('--tmp', default="tmp/prune", type=str, help='tmp folder')
 parser.add_argument('--randseed', type=int, default=None, help='random seed')
 parser.add_argument('--fix-lr', action="store_true")
@@ -67,10 +66,10 @@ penalties = {dim: get_penalty_matrix(dim, dim, power=args.power) for dim in [64,
 def main():
     logger.info(args)
     if args.dataset == "cifar10":
-        train_loader, val_loader = datasets.cifar10(abspath("/home/kai/.torch/data"), bs=args.bs)
+        train_loader, val_loader = datasets.cifar10(abspath(args.data), bs=args.bs)
         num_classes = 10
     elif args.dataset == "cifar100":
-        train_loader, val_loader = datasets.cifar100(abspath("/home/kai/.torch/data"), bs=args.bs)
+        train_loader, val_loader = datasets.cifar100(abspath(args.data), bs=args.bs)
         num_classes = 100
 
     # model and optimizer
@@ -98,7 +97,7 @@ def main():
             }, is_best=False, path=args.tmp, filename="initial-weights.pth")
 
     # optionally resume from a checkpoint
-    if args.resume:
+    if args.resume is not None:
         if isfile(args.resume):
             shutil.copy(args.resume, args.tmp)
             logger.info("=> loading checkpoint '{}'".format(args.resume))

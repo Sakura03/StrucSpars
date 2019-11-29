@@ -66,7 +66,7 @@ class GroupableConv2d(nn.Conv2d):
 
     def compute_regularity(self, penalty):
         shuffled_weight_norm = self.weight_norm[self.P, :][:, self.Q]
-        return torch.mean(shuffled_weight_norm * penalty)
+        return torch.sum(shuffled_weight_norm * penalty)
     
     @torch.no_grad()
     def real_group(self, group_level):

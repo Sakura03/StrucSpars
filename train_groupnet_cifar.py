@@ -299,7 +299,7 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
                 logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                             'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
                             'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \
-                            .format(epoch, args.epochs, i, len(train_loader), batch_time=batch_time, data_time=data_time,
+                            .format(epoch, args.finetune_epochs, i, len(train_loader), batch_time=batch_time, data_time=data_time,
                                     loss=losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
             else:
                 logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '

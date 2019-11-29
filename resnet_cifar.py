@@ -23,6 +23,7 @@ class GroupableConv2d(nn.Conv2d):
                                               stride=stride, padding=padding, dilation=dilation, bias=bias)
         self.register_buffer("P", torch.arange(self.out_channels))
         self.register_buffer("Q", torch.arange(self.in_channels))
+        self.grouped = False
         
     def compute_weight_norm(self, p=1):
         self.weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=p)
@@ -62,19 +63,21 @@ class GroupableConv2d(nn.Conv2d):
     
     @torch.no_grad()
     def real_group(self, group_level):
+        self.grouped = True
         self.groups = 2 ** (group_level-1)
         weight = torch.zeros(self.out_channels, self.in_channels // self.groups, *self.kernel_size).to(self.weight.data.device)
         split_out, split_in = self.out_channels // self.groups, self.in_channels // self.groups
         for g in range(self.groups):
-            weight[g*split_out:(g+1)*split_out] = self.weight.data[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
+            permuted_weight = self.weight.data[self.P, :][:, self.Q]
+            weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
         self.weight = nn.Parameter(weight)
         _, self.P_inv = torch.sort(self.P)
     
     def forward(self, x):
-        if self.groups > 1:
+        if self.grouped:
             x = x[:, self.Q, :, :]
         out = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        if self.groups > 1:
+        if self.grouped:
             out = out[:, self.P_inv, :, :]
         return out
 

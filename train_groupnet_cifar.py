@@ -25,19 +25,20 @@ parser.add_argument('--milestones', default=[80, 120], type=eval, help='mileston
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float, metavar='WD', help='weight decay')
 parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to latest checkpoint')
-parser.add_argument('--tmp', default="tmp/prune", type=str, help='tmp folder')
+parser.add_argument('--tmp', default="results/tmp", type=str, help='tmp folder')
 parser.add_argument('--randseed', type=int, default=None, help='random seed')
 parser.add_argument('--fix-lr', action="store_true")
 parser.add_argument('--no-finetune', action="store_true")
 parser.add_argument('--sparsity', type=float, default=0., help='sparsity regularization')
-parser.add_argument('--delta-lambda', type=float, default=1e-3, help='delta lambda')
-parser.add_argument('--sparse-thres', type=float, default=5e-2, help='sparse threshold')
+parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
+parser.add_argument('--sparse-thres', type=float, default=0.05, help='sparse threshold')
 parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune epochs")
 parser.add_argument('--depth', type=int, default=50, help='model depth')
 parser.add_argument('--init-iters', type=int, default=50000, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=5000, help='Iterations for each epoch')
+parser.add_argument('--warmup', type=int, default=10, help='Warmup epochs (do not adjust lambda)')
 parser.add_argument('--power', type=float, default=0.5, help='Decay rate in the penalty matrix')
-parser.add_argument('--percent', type=float, default=0.5, help='pruning percent')
+parser.add_argument('--percent', type=float, default=0.5, help='remaining parameter percent')
 args = parser.parse_args()
 
 if args.randseed == None:
@@ -155,7 +156,7 @@ def main():
         sparsity_gain = (model_sparsity - last_sparsity)
         expected_sparsity_gain = (target_sparsity - model_sparsity) / (args.epochs - epoch)
 
-        if epoch >= 0:
+        if epoch >= args.warmup:
             # not sparse enough
             if model_sparsity < target_sparsity:
                 # 1st order

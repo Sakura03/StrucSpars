@@ -13,22 +13,22 @@ def isPower(n):
     return False
 
 @torch.no_grad()
-def get_penalty_matrix(dim1, dim2):
+def get_penalty_matrix(dim1, dim2, power=0.5):
     assert isPower(dim1) and isPower(dim2)
     weight = torch.zeros(dim1, dim2).cuda()
-    assign_location(weight, 0.5)
+    assign_location(weight, power, power)
     return weight
 
 @torch.no_grad()
-def assign_location(tensor, num):
+def assign_location(tensor, num, power):
     dim1, dim2 = tensor.size()
     if dim1 == 1 or dim2 == 1:
         return
     else:
         tensor[dim1//2:, :dim2//2] = num
         tensor[:dim1//2, dim2//2:] = num
-        assign_location(tensor[dim1//2:, dim2//2:], num / 2.)
-        assign_location(tensor[:dim1//2, :dim2//2], num / 2.)
+        assign_location(tensor[dim1//2:, dim2//2:], num*power, power)
+        assign_location(tensor[:dim1//2, :dim2//2], num*power, power)
 
 @torch.no_grad()
 def get_level(matrix, thres):

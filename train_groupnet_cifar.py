@@ -37,6 +37,7 @@ parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune e
 parser.add_argument('--depth', type=int, default=50, help='model depth')
 parser.add_argument('--init-iters', type=int, default=50000, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=5000, help='Iterations for each epoch')
+parser.add_argument('--power', type=float, default=0.5, help='Decay rate in the penalty matrix')
 parser.add_argument('--percent', type=float, default=0.5, help='pruning percent')
 args = parser.parse_args()
 
@@ -61,7 +62,7 @@ criterion = torch.nn.CrossEntropyLoss()
 tfboard_writer = SummaryWriter(log_dir=args.tmp)
 logger = Logger(join(args.tmp, "log.txt"))
 
-penalties = {dim: get_penalty_matrix(dim, dim) for dim in [64, 128, 256, 512]}
+penalties = {dim: get_penalty_matrix(dim, dim, power=args.power) for dim in [64, 128, 256, 512]}
 
 def main():
     logger.info(args)

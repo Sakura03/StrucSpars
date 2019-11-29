@@ -58,12 +58,12 @@ class GroupableConv2d(nn.Conv2d):
                 self.Q[idx2] = tmp
             # if verbose:
             #     print("Iter [%d/%d] Loss: %.3f" % (i, iters, self.compute_loss(penalty)))
-    """
-    @torch.no_grad()
-    def compute_loss(self, penalty):
-        permuted_weight_norm = self.weight_norm[self.P, :][:, self.Q]
-        return torch.sum(permuted_weight_norm * penalty)
-    """            
+
+    # @torch.no_grad()
+    # def compute_loss(self, penalty):
+    #     permuted_weight_norm = self.weight_norm[self.P, :][:, self.Q]
+    #     return torch.sum(permuted_weight_norm * penalty)
+
     def compute_regularity(self, penalty):
         shuffled_weight_norm = self.weight_norm[self.P, :][:, self.Q]
         return torch.mean(shuffled_weight_norm * penalty)

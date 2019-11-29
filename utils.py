@@ -88,11 +88,11 @@ def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.001):
 
 @torch.no_grad()
 def get_mask_from_level(level, dim):
-    mask = torch.ones(dim, dim, dtype=torch.int64).cuda()
+    mask = torch.ones(dim, dim).cuda()
     penalty = get_penalty_matrix(dim, dim)
     u = torch.unique(penalty, sorted=True)
     for i in range(1, level):
-        mask[penalty == u[-i]] = 0
+        mask[penalty == u[-i]] = 0.
     return mask
 
 def update_permutation_matrix(model, penalties, iters=1):
@@ -116,7 +116,8 @@ def mask_group(model, factors, thres, logger):
             _, P_inv = torch.sort(m.P)
             _, Q_inv = torch.sort(m.Q)
             permuted_mask = mask[P_inv, :][:, Q_inv]
-            m.weight.data[permuted_mask] = 0.
+            permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
+            m.weight.data *= permuted_mask
             group_levels[name] = level
             total_connections += mask.numel()
             remaining_connections += mask.sum()

@@ -128,12 +128,13 @@ def main():
         update_permutation_matrix(model, penalties, iters=args.epoch_iters)
         
         # calculate FLOPs and params
-        m = eval(model_name)
+        m = eval(model_name).cuda()
         factors = get_factors(model.module)
         group_levels = mask_group(m, factors, args.sparse_thres, logger)
         real_group(m, group_levels)
         flops, params = profile(m, inputs=(torch.randn(1, 3, 32, 32), ), verbose=False)
         del m
+        torch.cuda().empty_cache()
         logger.info("%d FLOPs, %d params" % (flops, params))
         tfboard_writer.add_scalar("train/FLOPs", flops, epoch)
         tfboard_writer.add_scalar("train/Params", params, epoch)

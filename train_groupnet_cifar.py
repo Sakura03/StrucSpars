@@ -161,7 +161,7 @@ def main():
             if model_sparsity < target_sparsity:
                 # 1st order
                 if sparsity_gain < expected_sparsity_gain:
-                    logger.info("Sparsity gain %f (expected%f), increasing sparse penalty."%(sparsity_gain, expected_sparsity_gain))
+                    logger.info("Sparsity gain %f (expected %f), increasing sparse penalty."%(sparsity_gain, expected_sparsity_gain))
                     args.sparsity += args.delta_lambda
             # over sparse
             elif model_sparsity > target_sparsity:

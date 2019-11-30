@@ -6,11 +6,12 @@ from vltools import Logger
 from vltools.pytorch import save_checkpoint, AverageMeter, accuracy
 from vltools.pytorch import datasets
 from torch.optim.lr_scheduler import MultiStepLR
+from resnet_cifar import GroupableConv2d
 from utils import get_penalty_matrix, get_factors, get_sparsity, get_sparsity_loss
 from utils import get_threshold, mask_group, real_group, update_permutation_matrix
 import resnet_cifar
 from tensorboardX import SummaryWriter
-from thop import profile
+from thop import profile, count_hooks
 
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
@@ -63,6 +64,7 @@ tfboard_writer = SummaryWriter(log_dir=args.tmp)
 logger = Logger(join(args.tmp, "log.txt"))
 
 penalties = {dim: get_penalty_matrix(dim, dim, power=args.power) for dim in [64, 128, 256, 512]}
+custom_ops = {GroupableConv2d: count_hooks.count_convNd}
 
 def main():
     logger.info(args)
@@ -76,7 +78,7 @@ def main():
     # model and optimizer
     model_name = "resnet_cifar.resnet%d(num_classes=%d)" % (args.depth, num_classes)
     model = eval(model_name).cuda()
-    flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), verbose=False)
+    flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
     tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
     tfboard_writer.add_scalar("train/Params", params, global_step=-1)
     model = nn.DataParallel(model)
@@ -132,7 +134,7 @@ def main():
         factors = get_factors(model.module)
         group_levels = mask_group(m, factors, args.sparse_thres, logger)
         real_group(m, group_levels)
-        flops, params = profile(m, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), verbose=False)
+        flops, params = profile(m, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
         del m
         torch.cuda.empty_cache()
         logger.info("%d FLOPs, %d params" % (flops, params))
@@ -205,7 +207,7 @@ def main():
 
     # real grouping
     real_group(model.module, group_levels)
-    flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), verbose=False)
+    flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
     logger.info("FLOPs %.3E, Params %.3E (after real pruning)" % (flops, params))
 
     logger.info("evaluating after real grouping...")

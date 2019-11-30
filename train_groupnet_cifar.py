@@ -12,7 +12,6 @@ from utils import update_permutation_matrix, mask_group, real_group
 import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
-global args
 
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
@@ -29,13 +28,15 @@ parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float, metavar=
 parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to latest checkpoint')
 parser.add_argument('--tmp', default="results/tmp", type=str, help='tmp folder')
 parser.add_argument('--randseed', type=int, default=None, help='random seed')
-parser.add_argument('--fix-lr', action="store_true")
-parser.add_argument('--no-finetune', action="store_true")
-parser.add_argument('--sparsity', type=float, default=0., help='sparsity regularization')
+parser.add_argument('--fix-lr', action="store_true", help='set true to fix learning rate')
+parser.add_argument('--no-finetune', action="store_true", help='set true to disable finetuning')
+parser.add_argument('--group1x1', action="store_true", help='set true to group conv1x1')
+parser.add_argument('--adjust-lambda', action="store_true", help='set true to automatically adjust l1lambda')
+parser.add_argument('--sparsity', type=float, default=1e-5, help='sparsity regularization')
 parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
 parser.add_argument('--sparse-thres', type=float, default=0.05, help='sparse threshold')
 parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune epochs")
-parser.add_argument('--depth', type=int, default=164, help='model depth')
+parser.add_argument('--depth', type=int, default=50, help='model depth')
 parser.add_argument('--init-iters', type=int, default=50000, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=5000, help='Iterations for each epoch')
 parser.add_argument('--warmup', type=int, default=10, help='Warmup epochs (do not adjust lambda)')
@@ -155,27 +156,27 @@ def main():
 
         logger.info("Best acc1=%.5f" % best_acc1)
         model_sparsity = get_sparsity(factors, thres=args.sparse_thres)
-
-        target_sparsity = args.percent
-        sparsity_gain = (model_sparsity - last_sparsity)
-        expected_sparsity_gain = (target_sparsity - model_sparsity) / (args.epochs - epoch)
-
-        if epoch >= args.warmup:
-            # not sparse enough
-            if model_sparsity < target_sparsity:
-                # 1st order
-                if sparsity_gain < expected_sparsity_gain:
-                    logger.info("Sparsity gain %f (expected %f), increasing sparse penalty."%(sparsity_gain, expected_sparsity_gain))
-                    args.sparsity += args.delta_lambda
-            # over sparse
-            elif model_sparsity > target_sparsity:
-                if model_sparsity > last_sparsity and args.sparsity > 0:
-                    args.sparsity -= args.delta_lambda
-            # minimal sparsity=0
-            args.sparsity = max(args.sparsity, 0)
-
-        logger.info("Model sparsity=%f (last=%f, target=%f), args.sparsity=%f" % (model_sparsity, last_sparsity, target_sparsity, args.sparsity))
-        last_sparsity = model_sparsity
+        
+        if args.adjust_lambda:
+            target_sparsity = args.percent
+            sparsity_gain = (model_sparsity - last_sparsity)
+            expected_sparsity_gain = (target_sparsity - model_sparsity) / (args.epochs - epoch)
+            if epoch >= args.warmup:
+                # not sparse enough
+                if model_sparsity < target_sparsity:
+                    # 1st order
+                    if sparsity_gain < expected_sparsity_gain:
+                        logger.info("Sparsity gain %f (expected %f), increasing sparse penalty."%(sparsity_gain, expected_sparsity_gain))
+                        args.sparsity += args.delta_lambda
+                # over sparse
+                elif model_sparsity > target_sparsity:
+                    if model_sparsity > last_sparsity and args.sparsity > 0:
+                        args.sparsity -= args.delta_lambda
+                # minimal sparsity=0
+                args.sparsity = max(args.sparsity, 0)
+            logger.info("Model sparsity=%f (last=%f, target=%f), args.sparsity=%f" % (model_sparsity, last_sparsity, target_sparsity, args.sparsity))
+            last_sparsity = model_sparsity
+        
         lr = optimizer.param_groups[0]["lr"]
 
         tfboard_writer.add_scalar('train/loss_epoch', loss, epoch)
@@ -203,16 +204,16 @@ def main():
     logger.info("Prune rate %.3E, threshold %.3E" % (args.percent, thres))
     group_levels = mask_group(model.module, get_factors(model.module), thres, logger)
 
-    logger.info("evaluating after masking...")
+    logger.info("evaluating after grouping...")
     validate(val_loader, model, args.epochs)
 
     # real grouping
-    real_group(model.module, group_levels)
-    flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
-    logger.info("FLOPs %.3E, Params %.3E (after real pruning)" % (flops, params))
+    # real_group(model.module, group_levels)
+    # flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
+    # logger.info("FLOPs %.3E, Params %.3E (after real pruning)" % (flops, params))
 
-    logger.info("evaluating after real grouping...")
-    acc1, acc5 = validate(val_loader, model, args.epochs)
+    # logger.info("evaluating after real grouping...")
+    # acc1, acc5 = validate(val_loader, model, args.epochs)
 
     # shutdown when "args.no-finetune" is triggered
     if args.no_finetune: return
@@ -221,7 +222,7 @@ def main():
     tfboard_writer.add_scalar('finetune/acc5_epoch', acc5, global_step=-1)
 
     # finetune
-    optimizer_finetune = torch.optim.SGD( model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    optimizer_finetune = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     scheduler_finetune = MultiStepLR(optimizer_finetune, milestones=args.milestones, gamma=args.gamma)
 

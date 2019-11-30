@@ -92,6 +92,7 @@ class GroupableConv2d(nn.Conv2d):
         _, P_inv = torch.sort(self.P)
         _, Q_inv = torch.sort(self.Q)
         self.permuted_mask = mask[P_inv, :][:, Q_inv]
+        self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
         self.weight.data *= self.permuted_mask
         return self.permuted_mask
     

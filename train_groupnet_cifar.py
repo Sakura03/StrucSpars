@@ -7,11 +7,12 @@ from vltools.pytorch import save_checkpoint, AverageMeter, accuracy
 from vltools.pytorch import datasets
 from torch.optim.lr_scheduler import MultiStepLR
 from resnet_cifar import GroupableConv2d
-from utils import get_penalty_matrix, get_factors, get_sparsity, get_sparsity_loss
-from utils import get_threshold, mask_group, real_group, update_permutation_matrix
+from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold
+from utils import update_permutation_matrix, mask_group, real_group
 import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
+global args
 
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
@@ -34,7 +35,7 @@ parser.add_argument('--sparsity', type=float, default=0., help='sparsity regular
 parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
 parser.add_argument('--sparse-thres', type=float, default=0.05, help='sparse threshold')
 parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune epochs")
-parser.add_argument('--depth', type=int, default=50, help='model depth')
+parser.add_argument('--depth', type=int, default=164, help='model depth')
 parser.add_argument('--init-iters', type=int, default=50000, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=5000, help='Iterations for each epoch')
 parser.add_argument('--warmup', type=int, default=10, help='Warmup epochs (do not adjust lambda)')
@@ -63,7 +64,6 @@ criterion = torch.nn.CrossEntropyLoss()
 tfboard_writer = SummaryWriter(log_dir=args.tmp)
 logger = Logger(join(args.tmp, "log.txt"))
 
-penalties = {dim: get_penalty_matrix(dim, dim, power=args.power) for dim in [64, 128, 256, 512]}
 custom_ops = {GroupableConv2d: count_hooks.count_convNd}
 
 def main():
@@ -76,7 +76,8 @@ def main():
         num_classes = 100
 
     # model and optimizer
-    model_name = "resnet_cifar.resnet%d(num_classes=%d)" % (args.depth, num_classes)
+    group1x1 = "True" if args.group1x1 else "False"
+    model_name = "resnet_cifar.resnet%d(num_classes=%d, group1x1=%s)" % (args.depth, num_classes, group1x1)
     model = eval(model_name).cuda()
     flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
     tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
@@ -115,7 +116,7 @@ def main():
 
     scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
     
-    update_permutation_matrix(model, penalties, iters=args.init_iters)
+    update_permutation_matrix(model, iters=args.init_iters)
     factors = get_factors(model.module)
     last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
     for k, v in factors.items():
@@ -127,7 +128,7 @@ def main():
         if not args.fix_lr:
             scheduler.step()
 
-        update_permutation_matrix(model, penalties, iters=args.epoch_iters)
+        update_permutation_matrix(model, iters=args.epoch_iters)
         
         # calculate FLOPs and params
         m = eval(model_name).cuda()
@@ -275,8 +276,8 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
 
         # update the permutation matrices and compute the regularity
         if not finetune:
-            update_permutation_matrix(model, penalties)
-            sparsity_loss = get_sparsity_loss(model, penalties)
+            update_permutation_matrix(model)
+            sparsity_loss = get_sparsity_loss(model)
             total_loss = loss + l1lambda * sparsity_loss
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))

@@ -1,21 +1,35 @@
-import torch
+import torch, math
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.model_zoo as model_zoo
 import numpy as np
 
-__all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
-           'resnet152']
+def isPower(n):
+    if n < 1:
+        return False
+    i = 1
+    while i <= n:
+        if i == n:
+            return True
+        i <<= 1
+    return False
 
+@torch.no_grad()
+def get_penalty_matrix(dim1, dim2, power=0.5):
+    assert isPower(dim1) and isPower(dim2)
+    weight = torch.zeros(dim1, dim2)
+    assign_location(weight, 1., power)
+    return weight
 
-model_urls = {
-        'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
-        'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-        'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-        'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
-        'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth'
-        }
-
+@torch.no_grad()
+def assign_location(tensor, num, power):
+    dim1, dim2 = tensor.size()
+    if dim1 == 1 or dim2 == 1:
+        return
+    else:
+        tensor[dim1//2:, :dim2//2] = num
+        tensor[:dim1//2, dim2//2:] = num
+        assign_location(tensor[dim1//2:, dim2//2:], num*power, power)
+        assign_location(tensor[:dim1//2, :dim2//2], num*power, power)
 
 class GroupableConv2d(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
@@ -23,46 +37,40 @@ class GroupableConv2d(nn.Conv2d):
                                               stride=stride, padding=padding, dilation=dilation, bias=bias)
         self.register_buffer("P", torch.arange(self.out_channels))
         self.register_buffer("Q", torch.arange(self.in_channels))
+        self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, args.power))
         self.grouped = False
         
     def compute_weight_norm(self, p=1):
-        self.weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=p)
+        self.weight_norm = torch.norm(self.weight.data.view(self.out_channels, self.in_channels, -1), dim=-1, p=p)
     
     @torch.no_grad()
-    def compare_loss(self, penalty, idx1, idx2, row=True):
+    def compare_loss(self, idx1, idx2, row=True):
         if row:
             shuffled_weight_norm = self.weight_norm[:, self.Q]
-            loss = torch.sum(shuffled_weight_norm[self.P[idx1], :] * penalty[idx1, :] + shuffled_weight_norm[self.P[idx2], :] * penalty[idx2, :])
-            loss_exchanged = torch.sum(shuffled_weight_norm[self.P[idx2], :] * penalty[idx1, :] + shuffled_weight_norm[self.P[idx1], :] * penalty[idx2, :])
+            loss = torch.sum(shuffled_weight_norm[self.P[idx1], :] * self.penalty[idx1, :] + shuffled_weight_norm[self.P[idx2], :] * self.penalty[idx2, :])
+            loss_exchanged = torch.sum(shuffled_weight_norm[self.P[idx2], :] * self.penalty[idx1, :] + shuffled_weight_norm[self.P[idx1], :] * self.penalty[idx2, :])
         else:
             shuffled_weight_norm = self.weight_norm[self.P, :]
-            loss = torch.sum(shuffled_weight_norm[:, self.Q[idx1]] * penalty[:, idx1] + shuffled_weight_norm[:, self.Q[idx2]] * penalty[:, idx2])
-            loss_exchanged = torch.sum(shuffled_weight_norm[:, self.Q[idx2]] * penalty[:, idx1] + shuffled_weight_norm[:, self.Q[idx1]] * penalty[:, idx2])
+            loss = torch.sum(shuffled_weight_norm[:, self.Q[idx1]] * self.penalty[:, idx1] + shuffled_weight_norm[:, self.Q[idx2]] * self.penalty[:, idx2])
+            loss_exchanged = torch.sum(shuffled_weight_norm[:, self.Q[idx2]] * self.penalty[:, idx1] + shuffled_weight_norm[:, self.Q[idx1]] * self.penalty[:, idx2])
         if loss_exchanged < loss:
             return True
         else:
             return False
     
     @torch.no_grad()
-    def stochastic_exchange(self, penalty, iters=1):
+    def stochastic_exchange(self, iters=1):
         for i in range(iters):
             idx1, idx2 = np.random.choice(self.out_channels, size=2, replace=False)
-            if self.compare_loss(penalty, idx1, idx2, row=True):
+            if self.compare_loss(self.penalty, idx1, idx2, row=True):
                 tmp = self.P[idx1].clone()
                 self.P[idx1] = self.P[idx2]
                 self.P[idx2] = tmp
             idx1, idx2 = np.random.choice(self.in_channels, size=2, replace=False)
-            if self.compare_loss(penalty, idx1, idx2, row=False):
+            if self.compare_loss(self.penalty, idx1, idx2, row=False):
                 tmp = self.Q[idx1].clone()
                 self.Q[idx1] = self.Q[idx2]
                 self.Q[idx2] = tmp
-            # if verbose:
-            #     print("Iter [%d/%d] Loss: %.3f" % (i, iters, self.compute_loss(penalty)))
-
-    # @torch.no_grad()
-    # def compute_loss(self, penalty):
-    #     permuted_weight_norm = self.weight_norm[self.P, :][:, self.Q]
-    #     return torch.sum(permuted_weight_norm * penalty)
 
     def compute_regularity(self, penalty):
         shuffled_weight_norm = self.weight_norm[self.P, :][:, self.Q]
@@ -79,6 +87,7 @@ class GroupableConv2d(nn.Conv2d):
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
         self.weight = nn.Parameter(weight)
         _, self.P_inv = torch.sort(self.P)
+        del self.penalty
     
     def forward(self, x):
         if self.grouped:
@@ -88,19 +97,21 @@ class GroupableConv2d(nn.Conv2d):
             out = out[:, self.P_inv, :, :]
         return out
 
-def conv3x3(in_planes, out_planes, stride=1):
-    """3x3 convolution with padding"""
-    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+def conv1x1(in_planes, out_planes, stride=1, group=False):
+    " 1x1 convolution "
+    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False) if group \
+           else nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
-def conv1x1(in_planes, out_planes, stride=1):
-    """1x1 convolution"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+def conv3x3(in_planes, out_planes, stride=1, group=True):
+    " 3x3 convolution with padding "
+    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False) if group \
+           else nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
 
 class BasicBlock(nn.Module):
-    expansion = 1
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+    expansion=1
+    def __init__(self, inplanes, planes, stride=1, downsample=None, group1x1=False):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = nn.BatchNorm2d(planes)
@@ -111,34 +122,37 @@ class BasicBlock(nn.Module):
         self.stride = stride
 
     def forward(self, x):
-        identity = x
+        residual = x
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
+
         if self.downsample is not None:
-            identity = self.downsample(x)
-        out += identity
+            residual = self.downsample(x)
+
+        out += residual
         out = self.relu(out)
         return out
 
+
 class Bottleneck(nn.Module):
-    expansion = 4
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+    expansion=4
+    def __init__(self, inplanes, planes, stride=1, downsample=None, group1x1=False):
         super(Bottleneck, self).__init__()
-        self.conv1 = conv1x1(inplanes, planes)
+        self.conv1 = conv1x1(inplanes, planes, group=group1x1)
         self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = conv3x3(planes, planes, stride)
+        self.conv2 = conv3x3(planes, planes, stride=stride, group=True)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = conv1x1(planes, planes * self.expansion)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.conv3 = conv1x1(planes, planes*4, group=group1x1)
+        self.bn3 = nn.BatchNorm2d(planes*4)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
 
     def forward(self, x):
-        identity = x
+        residual = x
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
@@ -147,56 +161,49 @@ class Bottleneck(nn.Module):
         out = self.relu(out)
         out = self.conv3(out)
         out = self.bn3(out)
+
         if self.downsample is not None:
-            identity = self.downsample(x)
-        out += identity
+            residual = self.downsample(x)
+
+        out += residual
         out = self.relu(out)
         return out
 
 class ResNet(nn.Module):
-    def __init__(self, block, layers, num_classes=1000, zero_init_residual=False):
+    def __init__(self, block, layers, num_classes=10, group1x1=False):
         super(ResNet, self).__init__()
-        self.inplanes = 64
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.group1x1 = group1x1
+        self.inplanes = 16
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(16)
         self.relu = nn.ReLU(inplace=True)
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        self.layer1 = self._make_layer(block, 16, layers[0])
+        self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d(output_size=1)
+        self.fc = nn.Linear(64 * block.expansion, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-        # Zero-initialize the last BN in each residual branch,
-        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
-        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
-        if zero_init_residual:
-            for m in self.modules():
-                if isinstance(m, Bottleneck):
-                    nn.init.constant_(m.bn3.weight, 0)
-                elif isinstance(m, BasicBlock):
-                    nn.init.constant_(m.bn2.weight, 0)
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                    conv1x1(self.inplanes, planes * block.expansion, stride),
-                    nn.BatchNorm2d(planes * block.expansion),
+                    conv1x1(self.inplanes, planes*block.expansion, stride=stride, group=self.group1x1),
+                    nn.BatchNorm2d(planes * block.expansion)
                     )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
+        layers.append(block(self.inplanes, planes, stride, downsample, self.group1x1))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, group1x1=self.group1x1))
 
         return nn.Sequential(*layers)
 
@@ -208,69 +215,48 @@ class ResNet(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4(x)
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+
         return x
 
-
-def resnet18(pretrained=False, **kwargs):
-    """Constructs a ResNet-18 model.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
+def resnet20(**kwargs):
+    model = ResNet(BasicBlock, [3, 3, 3], **kwargs)
     return model
 
-
-def resnet34(pretrained=False, **kwargs):
-    """Constructs a ResNet-34 model.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet34']))
+def resnet32(**kwargs):
+    model = ResNet(BasicBlock, [5, 5, 5], **kwargs)
     return model
 
-
-def resnet50(pretrained=False, **kwargs):
-    """Constructs a ResNet-50 model.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet50']))
+def resnet44(**kwargs):
+    model = ResNet(BasicBlock, [7, 7, 7], **kwargs)
     return model
 
-
-def resnet101(pretrained=False, **kwargs):
-    """Constructs a ResNet-101 model.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet101']))
+def resnet56(**kwargs):
+    model = ResNet(BasicBlock, [9, 9, 9], **kwargs)
     return model
 
-
-def resnet152(pretrained=False, **kwargs):
-    """Constructs a ResNet-152 model.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet152']))
+def resnet110(**kwargs):
+    model = ResNet(BasicBlock, [18, 18, 18], **kwargs)
     return model
+
+def resnet1202(**kwargs):
+    model = ResNet(BasicBlock, [200, 200, 200], **kwargs)
+    return model
+
+def resnet164(**kwargs):
+    model = ResNet(Bottleneck, [18, 18, 18], **kwargs)
+    return model
+
+def resnet1001(**kwargs):
+    model = ResNet(Bottleneck, [111, 111, 111], **kwargs)
+    return model
+
+if __name__ == '__main__':
+    net = resnet164(group1x1=True)
+    y = net(torch.randn(2, 3, 64, 64))
+    print(net)
+    print(y.size())
+

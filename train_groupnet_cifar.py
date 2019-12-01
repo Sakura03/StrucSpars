@@ -13,6 +13,7 @@ import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 
+
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--print-freq', default=20, type=int, metavar='N', help='print frequency (default: 20)')

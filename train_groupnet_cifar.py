@@ -32,20 +32,20 @@ parser.add_argument('--group1x1', action="store_true", help='set true to group c
 parser.add_argument('--adjust-lambda', action="store_true", help='set true to automatically adjust l1lambda')
 parser.add_argument('--sparsity', type=float, default=1e-5, help='sparsity regularization')
 parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
-parser.add_argument('--sparse-thres', type=float, default=0.05, help='sparse threshold')
+parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
 parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune epochs")
 parser.add_argument('--depth', type=int, default=50, help='model depth')
 parser.add_argument('--init-iters', type=int, default=50000, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=5000, help='Iterations for each epoch')
 parser.add_argument('--warmup', type=int, default=10, help='Warmup epochs (do not adjust lambda)')
-parser.add_argument('--power', type=float, default=0.5, help='Decay rate in the penalty matrix')
+parser.add_argument('--power', type=float, default=0.3, help='Decay rate in the penalty matrix')
 parser.add_argument('--percent', type=float, default=0.5, help='remaining parameter percent')
 args = parser.parse_args()
 
 if args.randseed == None:
     args.randseed = np.random.randint(1000)
 args.tmp = args.tmp.strip("/")
-args.tmp = join(args.tmp, "seed%d"%(args.percent, args.randseed))
+args.tmp = join(args.tmp, "seed%d" % args.randseed)
 
 # Random seed
 # According to https://pytorch.org/docs/master/notes/randomness.html

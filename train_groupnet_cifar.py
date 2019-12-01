@@ -2,9 +2,7 @@ import torch, os, argparse, time, shutil
 import torch.nn as nn
 import numpy as np
 from os.path import join, isfile, abspath
-from vltools import Logger
-from vltools.pytorch import save_checkpoint, AverageMeter, accuracy
-from vltools.pytorch import datasets
+from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, cifar10, cifar100
 from torch.optim.lr_scheduler import MultiStepLR
 from resnet_cifar import GroupableConv2d
 from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold
@@ -13,11 +11,10 @@ import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 
-
 parser = argparse.ArgumentParser(description='PyTorch Cifar Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--print-freq', default=20, type=int, metavar='N', help='print frequency (default: 20)')
-parser.add_argument('--data', metavar='DIR', default="/home/kai/.torch/data", help='path to dataset')
+parser.add_argument('--data', metavar='DIR', default="./data", help='path to dataset')
 parser.add_argument('--dataset', default="cifar100", help='dataset')
 parser.add_argument('--bs', '--batch-size', default=256, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--epochs', default=160, type=int, metavar='N', help='number of total epochs to run')
@@ -48,7 +45,7 @@ args = parser.parse_args()
 if args.randseed == None:
     args.randseed = np.random.randint(1000)
 args.tmp = args.tmp.strip("/")
-args.tmp = join(args.tmp, "resnet_cifar-depth%d"%args.depth, "rate%.2f-seed%d"%(args.percent, args.randseed))
+args.tmp = join(args.tmp, "seed%d"%(args.percent, args.randseed))
 
 # Random seed
 # According to https://pytorch.org/docs/master/notes/randomness.html
@@ -71,10 +68,10 @@ custom_ops = {GroupableConv2d: count_hooks.count_convNd}
 def main():
     logger.info(args)
     if args.dataset == "cifar10":
-        train_loader, val_loader = datasets.cifar10(abspath(args.data), bs=args.bs)
+        train_loader, val_loader = cifar10(abspath(args.data), bs=args.bs)
         num_classes = 10
     elif args.dataset == "cifar100":
-        train_loader, val_loader = datasets.cifar100(abspath(args.data), bs=args.bs)
+        train_loader, val_loader = cifar100(abspath(args.data), bs=args.bs)
         num_classes = 100
 
     # model and optimizer

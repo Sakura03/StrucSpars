@@ -53,7 +53,7 @@ class GroupableConv2d(nn.Conv2d):
         self.mask_grouped, self.real_grouped = False, False
         
     def compute_weight_norm(self, p=1):
-        self.weight_norm = torch.norm(self.weight.data.view(self.out_channels, self.in_channels, -1), dim=-1, p=p)
+        self.weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=p)
     
     @torch.no_grad()
     def compare_loss(self, idx1, idx2, row=True):

@@ -51,38 +51,40 @@ class GroupableConv2d(nn.Conv2d):
         self.register_buffer("Q", torch.arange(self.in_channels))
         self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, 0.3))
         self.mask_grouped, self.real_grouped = False, False
-        
-    def compute_weight_norm(self, p=1):
-        self.weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=p)
     
     @torch.no_grad()
-    def compare_loss(self, idx1, idx2, row=True):
+    def compare_loss(self, P, Q, idx1, idx2, weight_norm, row=True):
         if row:
-            shuffled_weight_norm = self.weight_norm[:, self.Q]
-            loss = torch.sum(shuffled_weight_norm[self.P[idx1], :] * self.penalty[idx1, :] + shuffled_weight_norm[self.P[idx2], :] * self.penalty[idx2, :])
-            loss_exchanged = torch.sum(shuffled_weight_norm[self.P[idx2], :] * self.penalty[idx1, :] + shuffled_weight_norm[self.P[idx1], :] * self.penalty[idx2, :])
+            shuffled_weight_norm = weight_norm[:, Q]
+            loss = torch.sum(shuffled_weight_norm[P[idx1], :] * self.penalty[idx1, :] + shuffled_weight_norm[P[idx2], :] * self.penalty[idx2, :])
+            loss_exchanged = torch.sum(shuffled_weight_norm[P[idx2], :] * self.penalty[idx1, :] + shuffled_weight_norm[P[idx1], :] * self.penalty[idx2, :])
         else:
-            shuffled_weight_norm = self.weight_norm[self.P, :]
-            loss = torch.sum(shuffled_weight_norm[:, self.Q[idx1]] * self.penalty[:, idx1] + shuffled_weight_norm[:, self.Q[idx2]] * self.penalty[:, idx2])
-            loss_exchanged = torch.sum(shuffled_weight_norm[:, self.Q[idx2]] * self.penalty[:, idx1] + shuffled_weight_norm[:, self.Q[idx1]] * self.penalty[:, idx2])
+            shuffled_weight_norm = weight_norm[self.P, :]
+            loss = torch.sum(shuffled_weight_norm[:, Q[idx1]] * self.penalty[:, idx1] + shuffled_weight_norm[:, Q[idx2]] * self.penalty[:, idx2])
+            loss_exchanged = torch.sum(shuffled_weight_norm[:, Q[idx2]] * self.penalty[:, idx1] + shuffled_weight_norm[:, Q[idx1]] * self.penalty[:, idx2])
         return True if loss_exchanged < loss else False
     
     @torch.no_grad()
     def stochastic_exchange(self, iters=1):
+        P, Q = self.P.clone(), self.Q.clone()
+        weight_norm = torch.norm(self.weight.data.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
+        print("start")
         for i in range(iters):
             idx1, idx2 = np.random.choice(self.out_channels, size=2, replace=False)
-            if self.compare_loss(idx1, idx2, row=True):
-                tmp = self.P[idx1].clone()
-                self.P[idx1] = self.P[idx2]
-                self.P[idx2] = tmp
+            if self.compare_loss(P, Q, idx1, idx2, weight_norm, row=True):
+                tmp = P[idx1].clone()
+                P[idx1] = P[idx2]
+                P[idx2] = tmp
             idx1, idx2 = np.random.choice(self.in_channels, size=2, replace=False)
-            if self.compare_loss(idx1, idx2, row=False):
-                tmp = self.Q[idx1].clone()
-                self.Q[idx1] = self.Q[idx2]
-                self.Q[idx2] = tmp
+            if self.compare_loss(P, Q, idx1, idx2, weight_norm, row=False):
+                tmp = Q[idx1].clone()
+                Q[idx1] = Q[idx2]
+                Q[idx2] = tmp
+        return P, Q
 
     def compute_regularity(self):
-        shuffled_weight_norm = self.weight_norm[self.P, :][:, self.Q]
+        weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
+        shuffled_weight_norm = weight_norm[self.P, :][:, self.Q]
         return torch.sum(shuffled_weight_norm * self.penalty)
     
     @torch.no_grad()

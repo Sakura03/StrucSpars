@@ -115,6 +115,7 @@ def compare_loss(P, Q, idx1, idx2, weight_norm, penalty, row=True):
 @torch.no_grad()
 def update_permutation_matrix(model, iters=1, mp=True):
     if mp:
+        model.cpu()
         pool = multiprocessing.Pool(processes=20)
         results = {}
         for name, m in model.named_modules():
@@ -126,6 +127,7 @@ def update_permutation_matrix(model, iters=1, mp=True):
         for name, m in model.named_modules():
             if isinstance(m, GroupableConv2d):
                 m.P, m.Q = results[name].get()
+        model.cuda()
     else:
         for name, m in model.named_modules():
             if isinstance(m, GroupableConv2d):

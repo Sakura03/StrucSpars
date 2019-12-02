@@ -115,7 +115,7 @@ def main():
 
     scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
     
-    update_permutation_matrix(model, iters=args.init_iters)
+    update_permutation_matrix(model, iters=args.init_iters, mp=True)
     factors = get_factors(model.module)
     last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
     for k, v in factors.items():
@@ -127,7 +127,7 @@ def main():
         if not args.fix_lr:
             scheduler.step()
 
-        update_permutation_matrix(model, iters=args.epoch_iters)
+        update_permutation_matrix(model, iters=args.epoch_iters, mp=True)
         
         # calculate FLOPs and params
         m = eval(model_name).cuda()
@@ -275,7 +275,7 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
 
         # update the permutation matrices and compute the regularity
         if not finetune:
-            update_permutation_matrix(model)
+            update_permutation_matrix(model, mp=False)
             sparsity_loss = get_sparsity_loss(model)
             total_loss = loss + l1lambda * sparsity_loss
 

@@ -122,7 +122,7 @@ def main():
         tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=-1)
     for epoch in range(args.start_epoch, args.epochs):
         # train and evaluate
-        loss, sloss = train(train_loader, model, optimizer, epoch, l1lambda=args.sparsity)
+        loss, sloss = train(train_loader, model, optimizer, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
         acc1, acc5 = validate(val_loader, model, epoch)
         if not args.fix_lr:
             scheduler.step()

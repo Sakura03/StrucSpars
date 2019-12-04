@@ -1,4 +1,4 @@
-import torch, os, argparse, time, shutil
+import torch, os, argparse, time
 import torch.nn as nn
 import numpy as np
 from os.path import join, isfile, abspath
@@ -6,7 +6,7 @@ from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, cifar10, ci
 from torch.optim.lr_scheduler import MultiStepLR
 from resnet_cifar import GroupableConv2d
 from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold
-from utils import update_permutation_matrix, mask_group, real_group
+from utils import set_group_levels, update_permutation_matrix, mask_group, real_group
 import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
@@ -35,8 +35,8 @@ parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lamb
 parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
 parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune epochs")
 parser.add_argument('--depth', type=int, default=50, help='model depth')
-parser.add_argument('--init-iters', type=int, default=50000, help='Initial iterations')
-parser.add_argument('--epoch-iters', type=int, default=5000, help='Iterations for each epoch')
+parser.add_argument('--init-iters', type=int, default=20, help='Initial iterations')
+parser.add_argument('--epoch-iters', type=int, default=10, help='Iterations for each epoch')
 parser.add_argument('--warmup', type=int, default=10, help='Warmup epochs (do not adjust lambda)')
 parser.add_argument('--power', type=float, default=0.3, help='Decay rate in the penalty matrix')
 parser.add_argument('--percent', type=float, default=0.5, help='remaining parameter percent')
@@ -102,7 +102,6 @@ def main():
     # optionally resume from a checkpoint
     if args.resume is not None:
         if isfile(args.resume):
-            shutil.copy(args.resume, args.tmp)
             logger.info("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
@@ -115,7 +114,7 @@ def main():
 
     scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
     
-    update_permutation_matrix(model, iters=args.init_iters, mp=True)
+    update_permutation_matrix(model, iters=args.init_iters)
     factors = get_factors(model.module)
     last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
     for k, v in factors.items():
@@ -127,13 +126,14 @@ def main():
         if not args.fix_lr:
             scheduler.step()
 
-        update_permutation_matrix(model, iters=args.epoch_iters, mp=True)
+        update_permutation_matrix(model, iters=args.epoch_iters)
         
         # calculate FLOPs and params
         m = eval(model_name).cuda()
         factors = get_factors(model.module)
         group_levels = mask_group(m, factors, args.sparse_thres, logger)
-        real_group(m, group_levels)
+        real_group(m)
+        set_group_levels(model.module, group_levels)
         flops, params = profile(m, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
         del m
         torch.cuda.empty_cache()
@@ -275,7 +275,6 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
 
         # update the permutation matrices and compute the regularity
         if not finetune:
-            update_permutation_matrix(model, mp=False)
             sparsity_loss = get_sparsity_loss(model)
             total_loss = loss + l1lambda * sparsity_loss
 
@@ -297,6 +296,9 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
         # measure elapsed time
         batch_time.update(time.time() - end)
         lr = optimizer.param_groups[0]["lr"]
+        
+        if not finetune and (i+1) % 500 == 0:
+            update_permutation_matrix(model, iters=1)
 
         if i % args.print_freq == 0:
             if finetune:

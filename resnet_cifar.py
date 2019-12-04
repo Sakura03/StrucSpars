@@ -1,4 +1,4 @@
-import torch
+import torch, ot
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -17,27 +17,28 @@ def isPower(n):
     return False
 
 @torch.no_grad()
-def get_penalty_matrix(dim1, dim2, power=0.5):
+def get_penalty_matrix(dim1, dim2, level=None, power=0.5):
     assert isPower(dim1) and isPower(dim2)
+    if level is None: level = 100
     weight = torch.zeros(dim1, dim2)
-    assign_location(weight, 1., power)
+    assign_location(weight, 1., level, power)
     return weight
 
 @torch.no_grad()
-def assign_location(tensor, num, power):
+def assign_location(tensor, num, level, power):
     dim1, dim2 = tensor.size()
-    if dim1 == 1 or dim2 == 1:
+    if dim1 == 1 or dim2 == 1 or level == 0:
         return
     else:
         tensor[dim1//2:, :dim2//2] = num
         tensor[:dim1//2, dim2//2:] = num
-        assign_location(tensor[dim1//2:, dim2//2:], num*power, power)
-        assign_location(tensor[:dim1//2, :dim2//2], num*power, power)
+        assign_location(tensor[dim1//2:, dim2//2:], num*power, level-1, power)
+        assign_location(tensor[:dim1//2, :dim2//2], num*power, level-1, power)
 
 @torch.no_grad()
 def get_mask_from_level(level, dim1, dim2):
     mask = torch.ones(dim1, dim2).cuda()
-    penalty = get_penalty_matrix(dim1, dim2)
+    penalty = get_penalty_matrix(dim1, dim2, level-1)
     u = torch.unique(penalty, sorted=True)
     for i in range(1, level):
         mask[penalty == u[-i]] = 0.
@@ -47,69 +48,75 @@ class GroupableConv2d(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
         super(GroupableConv2d, self).__init__(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
                                               stride=stride, padding=padding, dilation=dilation, bias=bias)
-        self.register_buffer("P", torch.arange(self.out_channels))
-        self.register_buffer("Q", torch.arange(self.in_channels))
-        self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, 0.3))
+        self.group_level = 1
         self.mask_grouped, self.real_grouped = False, False
+        self.P = np.arange(self.out_channels)
+        self.Q = np.arange(self.in_channels)
+        self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3))
+        self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=0.3).numpy().astype(np.float64)
     
-    @torch.no_grad()
-    def compare_loss(self, P, Q, idx1, idx2, weight_norm, row=True):
-        if row:
-            shuffled_weight_norm = weight_norm[:, Q]
-            loss = torch.sum(shuffled_weight_norm[P[idx1], :] * self.penalty[idx1, :] + shuffled_weight_norm[P[idx2], :] * self.penalty[idx2, :])
-            loss_exchanged = torch.sum(shuffled_weight_norm[P[idx2], :] * self.penalty[idx1, :] + shuffled_weight_norm[P[idx1], :] * self.penalty[idx2, :])
-        else:
-            shuffled_weight_norm = weight_norm[self.P, :]
-            loss = torch.sum(shuffled_weight_norm[:, Q[idx1]] * self.penalty[:, idx1] + shuffled_weight_norm[:, Q[idx2]] * self.penalty[:, idx2])
-            loss_exchanged = torch.sum(shuffled_weight_norm[:, Q[idx2]] * self.penalty[:, idx1] + shuffled_weight_norm[:, Q[idx1]] * self.penalty[:, idx2])
-        return True if loss_exchanged < loss else False
+    def matrix2idx(self, P, row=True):
+        idx = np.argmax(P, axis=1 if row else 0)
+        assert np.all(np.bincount(idx) == 1), "Invalid permutation matrix."
+        return idx 
     
-    @torch.no_grad()
-    def stochastic_exchange(self, iters=1):
-        P, Q = self.P.clone(), self.Q.clone()
-        weight_norm = torch.norm(self.weight.data.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
-        print("start")
-        for i in range(iters):
-            idx1, idx2 = np.random.choice(self.out_channels, size=2, replace=False)
-            if self.compare_loss(P, Q, idx1, idx2, weight_norm, row=True):
-                tmp = P[idx1].clone()
-                P[idx1] = P[idx2]
-                P[idx2] = tmp
-            idx1, idx2 = np.random.choice(self.in_channels, size=2, replace=False)
-            if self.compare_loss(P, Q, idx1, idx2, weight_norm, row=False):
-                tmp = Q[idx1].clone()
-                Q[idx1] = Q[idx2]
-                Q[idx2] = tmp
+    def set_group_level(self, group_level):
+        if self.group_level != group_level:
+            self.group_level = group_level
+            self.penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3).to(self.weight.device)
+        
+    def update_PQ(self, iters):
+        ones_P, ones_Q = np.ones((self.out_channels, ), dtype=np.float64), np.ones((self.in_channels, ), dtype=np.float64)
+        weight = self.weight.data.numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
+        weight_norm = np.linalg.norm(weight, ord=1, axis=-1)
+        # loss0 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
+        Q = self.Q
+        
+        for _ in range(iters):
+            permutated_weight_norm = weight_norm[:, Q]
+            M = np.matmul(self.template, permutated_weight_norm.T)
+            P = ot.emd(ones_P, ones_P, M)
+            P = self.matrix2idx(P, row=True)
+            loss1 = np.sum(weight_norm[P, :][:, Q] * self.template)
+            
+            permutated_weight_norm = weight_norm[P, :]
+            M = np.matmul(permutated_weight_norm.T, self.template)
+            Q = ot.emd(ones_Q, ones_Q, M)
+            Q = self.matrix2idx(Q, row=False)
+            loss2 = np.sum(weight_norm[P, :][:, Q] * self.template)
+            # print("%.8f->%.8f->%.8f" % (loss0, loss1, loss2))
+            if loss1 == loss2: break
+            # loss0 = loss2
         return P, Q
-
+    
     def compute_regularity(self):
         weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
         shuffled_weight_norm = weight_norm[self.P, :][:, self.Q]
         return torch.sum(shuffled_weight_norm * self.penalty)
     
     @torch.no_grad()
-    def mask_group(self, group_level):
-        self.groupeded = True
-        mask = get_mask_from_level(group_level, self.out_channels, self.in_channels)
-        _, P_inv = torch.sort(self.P)
-        _, Q_inv = torch.sort(self.Q)
+    def mask_group(self):
+        self.mask_grouped = True
+        mask = get_mask_from_level(self.group_level, self.out_channels, self.in_channels)
+        P_inv = np.argsort(self.P)
+        Q_inv = np.argsort(self.Q)
         self.permuted_mask = mask[P_inv, :][:, Q_inv]
         self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
         self.weight.data *= self.permuted_mask
         return self.permuted_mask
     
     @torch.no_grad()
-    def real_group(self, group_level):
+    def real_group(self):
         self.real_grouped = True
-        self.groups = 2 ** (group_level-1)
+        self.groups = 2 ** (self.group_level-1)
         weight = torch.zeros(self.out_channels, self.in_channels // self.groups, *self.kernel_size).to(self.weight.data.device)
         split_out, split_in = self.out_channels // self.groups, self.in_channels // self.groups
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
         self.weight = nn.Parameter(weight)
-        _, self.P_inv = torch.sort(self.P)
-        del self.penalty
+        self.P_inv = np.argsort(self.P)
+        del self.penalty, self.template
     
     def forward(self, x):
         if self.real_grouped:

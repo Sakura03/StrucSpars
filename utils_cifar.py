@@ -1,7 +1,6 @@
 import time, torch, multiprocessing
 import numpy as np
-import torch.distributed as dist
-from resnet_imagenet import GroupableConv2d, get_penalty_matrix
+from resnet_cifar import GroupableConv2d, get_penalty_matrix
 
 @torch.no_grad()
 def get_level(matrix, thres):
@@ -117,10 +116,3 @@ if __name__ == "__main__":
     start = time.time()
     update_permutation_matrix(model, iters=5000, mp=True)
     print(time.time() - start)
-    
-def synchronize_model(model):
-    for m in model.modules():
-        if isinstance(m, GroupableConv2d):
-            dist.broadcast(m.P, 0)
-            dist.broadcast(m.Q, 0)
-            dist.broadcast(m.penalty, 0)

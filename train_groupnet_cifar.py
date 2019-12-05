@@ -5,8 +5,8 @@ from os.path import join, isfile, abspath
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, cifar10, cifar100
 from torch.optim.lr_scheduler import MultiStepLR
 from resnet_cifar import GroupableConv2d
-from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold
-from utils import set_group_levels, update_permutation_matrix, mask_group, real_group
+from utils_cifar import get_factors, get_sparsity, get_sparsity_loss, get_threshold
+from utils_cifar import set_group_levels, update_permutation_matrix, mask_group, real_group
 import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
@@ -23,7 +23,7 @@ parser.add_argument('--gamma', default=0.1, type=float, metavar='GM', help='decr
 parser.add_argument('--milestones', default=[80, 120], type=eval, help='milestones for scheduling lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float, metavar='WD', help='weight decay')
-parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to latest checkpoint')
+parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to the latest checkpoint')
 parser.add_argument('--tmp', default="results/tmp", type=str, help='tmp folder')
 parser.add_argument('--randseed', type=int, default=None, help='random seed')
 parser.add_argument('--fix-lr', action="store_true", help='set true to fix learning rate')
@@ -175,11 +175,9 @@ def main():
             logger.info("Model sparsity=%f (last=%f, target=%f), args.sparsity=%f" % (model_sparsity, last_sparsity, target_sparsity, args.sparsity))
             last_sparsity = model_sparsity
         
-        lr = optimizer.param_groups[0]["lr"]
-
         tfboard_writer.add_scalar('train/loss_epoch', loss, epoch)
         tfboard_writer.add_scalar('train/sloss_epoch', sloss, epoch)
-        tfboard_writer.add_scalar('train/lr_epoch', lr, epoch)
+        tfboard_writer.add_scalar('train/lr_epoch', optimizer.param_groups[0]["lr"], epoch)
         tfboard_writer.add_scalar('train/model sparsity', model_sparsity, epoch)
         tfboard_writer.add_scalar('train/sparse penalty', args.sparsity, epoch)
         tfboard_writer.add_scalar('test/acc1_epoch', acc1, epoch)
@@ -208,7 +206,7 @@ def main():
     # real grouping
     # real_group(model.module, group_levels)
     # flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
-    # logger.info("FLOPs %.3E, Params %.3E (after real pruning)" % (flops, params))
+    # logger.info("FLOPs %.3E, Params %.3E (after real grouping)" % (flops, params))
 
     # logger.info("evaluating after real grouping...")
     # acc1, acc5 = validate(val_loader, model, args.epochs)

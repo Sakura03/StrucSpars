@@ -39,12 +39,18 @@ def get_sparsity(factors, thres):
 def get_sparsity_from_model(model, thres):
     return get_sparsity(get_factors(model), thres)
 
+@torch.no_grad()
 def get_sparsity_loss(model):
     loss = 0
     for m in model.modules():
         if isinstance(m, GroupableConv2d):
             loss += m.compute_regularity()
     return loss
+
+def impose_group_lasso(model, l1lambda):
+    for m in model.modules():
+        if isinstance(m, GroupableConv2d):
+            m.impose_regularity(l1lambda)
             
 @torch.no_grad()
 def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.001):

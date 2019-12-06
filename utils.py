@@ -63,26 +63,11 @@ def set_group_levels(model, group_levels):
         if isinstance(m, GroupableConv2d):
             m.set_group_level(group_levels[name])
 
-def update_one_module(module, iters, name):
-    P, Q = module.update_PQ(iters)
-    # print("Update permutation matrix of %s" % name)
-    return P, Q
-
 def update_permutation_matrix(model, iters=1):
     start = time.time()
-    model.cpu()
-    pool = multiprocessing.Pool(processes=8)
-    results = {}
     for name, m in model.named_modules():
         if isinstance(m, GroupableConv2d):
-            results[name] = pool.apply_async(update_one_module, args=(m, iters, name, ))
-    pool.close()
-    pool.join()
-        
-    for name, m in model.named_modules():
-        if isinstance(m, GroupableConv2d):
-            m.P, m.Q = results[name].get()
-    model.cuda()
+            m.update_PQ(iters)
     print("Update permutation matrices for %d iters, elapsed time: %.3f" % (iters, time.time()-start))
 
 @torch.no_grad()
@@ -110,17 +95,16 @@ def real_group(model):
         if isinstance(m, GroupableConv2d):
             m.real_group()
 
-if __name__ == "__main__":
-    from resnet_cifar import resnet50
-    import time
-    model = resnet50(group1x1=True)
-    start = time.time()
-    update_permutation_matrix(model, iters=5000, mp=True)
-    print(time.time() - start)
-    
+@torch.no_grad()
 def synchronize_model(model):
     for m in model.modules():
         if isinstance(m, GroupableConv2d):
-            dist.broadcast(m.P, 0)
-            dist.broadcast(m.Q, 0)
+            m.P_t = torch.from_numpy(m.P).cuda()
+            m.Q_t = torch.from_numpy(m.Q).cuda()
+            dist.broadcast(m.P_t, 0)
+            dist.broadcast(m.Q_t, 0)
             dist.broadcast(m.penalty, 0)
+
+            m.P = m.P_t.cpu().numpy()
+            m.Q = m.Q_t.cpu().numpy()
+            del m.P_t, m.Q_t

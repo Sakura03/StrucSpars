@@ -83,26 +83,22 @@ class GroupableConv2d(nn.Conv2d):
         
     def update_PQ(self, iters):
         ones_P, ones_Q = np.ones((self.out_channels, ), dtype=np.float64), np.ones((self.in_channels, ), dtype=np.float64)
-        weight = self.weight.data.numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
+        weight = self.weight.data.cpu().numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
         weight_norm = np.linalg.norm(weight, ord=1, axis=-1)
-        # loss0 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
-        Q = self.Q
         
         for _ in range(iters):
-            permutated_weight_norm = weight_norm[:, Q]
+            permutated_weight_norm = weight_norm[:, self.Q]
             M = np.matmul(self.template, permutated_weight_norm.T)
             P = ot.emd(ones_P, ones_P, M)
-            P = self.matrix2idx(P, row=True)
-            loss1 = np.sum(weight_norm[P, :][:, Q] * self.template)
+            self.P = self.matrix2idx(P, row=True)
+            loss1 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
             
-            permutated_weight_norm = weight_norm[P, :]
+            permutated_weight_norm = weight_norm[self.P, :]
             M = np.matmul(permutated_weight_norm.T, self.template)
             Q = ot.emd(ones_Q, ones_Q, M)
-            Q = self.matrix2idx(Q, row=False)
-            loss2 = np.sum(weight_norm[P, :][:, Q] * self.template)
-            # print("%.8f->%.8f->%.8f" % (loss0, loss1, loss2))
+            self.Q = self.matrix2idx(Q, row=False)
+            loss2 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
             if loss1 == loss2: break
-            # loss0 = loss2
         return P, Q
     
     def compute_regularity(self):

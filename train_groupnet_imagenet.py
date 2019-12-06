@@ -1,8 +1,7 @@
 import torch, os, argparse, time, warnings
 import numpy as np
 from os.path import join, isfile
-from vlutils import Logger, save_checkpoint, AverageMeter, accuracy
-from torch.optim.lr_scheduler import MultiStepLR
+from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, MultiStepLR
 from resnet_imagenet import GroupableConv2d
 from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold, synchronize_model
 from utils import set_group_levels, update_permutation_matrix, mask_group, real_group
@@ -27,7 +26,7 @@ parser.add_argument('-a', '--arch', default='resnet50', type=str, metavar='STR',
 parser.add_argument('--data', metavar='DIR', default="./data", help='path to dataset')
 parser.add_argument('--num-classes', default=1000, type=int, metavar='N', help='Number of classes')
 parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers')
-parser.add_argument('--bs', '--batch-size', default=256, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('--batch-size', default=64, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--imsize', default=256, type=int, metavar='N', help='image resize size')
 parser.add_argument('--imcrop', default=224, type=int, metavar='N', help='image crop size')
 parser.add_argument('--epochs', default=110, type=int, metavar='N', help='number of total epochs to run')
@@ -149,25 +148,6 @@ if 'WORLD_SIZE' in os.environ:
 if args.fp16:
     assert torch.backends.cudnn.enabled, "fp16 mode requires cudnn backend to be enabled."
 
-@torch.no_grad()
-def get_state_dict(model):
-    # cache state_dict
-    state_dict = dict(model.state_dict())
-    keys = list(state_dict.keys())
-
-    # adjust key names in state_dict
-    for k in keys:
-        if args.fp16:
-            # network_to_half will insert a "1" at head of key name
-            newk = k.replace("module.1.", "")
-        else:
-            # DDP (or DataParallel) will insert a "module." at head of key name
-            newk = k.replace("module.", "")
-        state_dict[newk] = state_dict[k]
-        del state_dict[k]
-
-    return state_dict
-
 def main():
     if args.local_rank == 0:
         logger.info(args)
@@ -177,6 +157,7 @@ def main():
         torch.cuda.set_device(args.gpu)
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.world_size = torch.distributed.get_world_size()
+        
     if args.use_rec:
         traindir = args.data
         valdir = args.data
@@ -195,7 +176,7 @@ def main():
     pipe.build()
     val_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
     train_loader_len = int(train_loader._size / args.batch_size)
-
+    
     # model and optimizer
     group1x1 = "True" if args.group1x1 else "False"
     model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
@@ -209,7 +190,7 @@ def main():
 
     if args.fp16:
         model = BN_convert_float(model.half())
-    model = DDP(model, delay_allreduce=True)
+    model = DDP(model, delay_allreduce=False) # torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     if args.local_rank == 0:
@@ -252,13 +233,13 @@ def main():
 
     if args.local_rank == 0:
         update_permutation_matrix(model, iters=args.init_iters)
-        synchronize_model(model)
-        
-    print("Rank %d/%d, P:" % (dist.get_rank(), args.local_rank, model.module.layer4[2].conv2.P)) ### TODO: to comment
+    # print("Rank%d:" % args.local_rank, model.module.layer1[0].conv2.P) ### TODO
+    synchronize_model(model)
+    # print("Rank%d:" % args.local_rank, model.module.layer1[0].conv2.P) ### TODO
         
     if args.local_rank == 0:
         factors = get_factors(model.module)
-        last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
+        # last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
         for k, v in factors.items():
             tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=-1)
     for epoch in range(args.start_epoch, args.epochs):
@@ -275,7 +256,8 @@ def main():
             group_levels = mask_group(m, factors, args.sparse_thres, logger)
             real_group(m)
             set_group_levels(model.module, group_levels)
-            synchronize_model(model)
+        synchronize_model(model)
+        if args.local_rank == 0:    
             flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).cuda(), ), custom_ops=custom_ops, verbose=False)
             del m
             torch.cuda.empty_cache()
@@ -325,10 +307,15 @@ def main():
                     args.sparsity = max(args.sparsity, 0)
                 logger.info("Model sparsity=%f (last=%f, target=%f), args.sparsity=%f" % (model_sparsity, last_sparsity, target_sparsity, args.sparsity))
                 last_sparsity = model_sparsity
-                # broadcast to other workers
-                current_sparsity = torch.tensor([args.sparsity])
-                dist.broadcast(current_sparsity, 0)
-                
+        
+        # broadcast to other workers
+        if args.adjust_lambda:
+            current_sparsity = torch.tensor([args.sparsity]).cuda()
+            dist.broadcast(current_sparsity, 0)
+            args.sparsity = current_sparsity.item()
+            del current_sparsity
+        
+        if args.local_rank == 0:
             tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
             tfboard_writer.add_scalar('train/sloss-epoch', sloss, epoch)
             tfboard_writer.add_scalar('train/lr-epoch', optimizer.param_groups[0]["lr"], epoch)
@@ -339,9 +326,6 @@ def main():
             
             for k, v in factors.items():
                 tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=epoch)
-            
-        if args.adjust_lambda: 
-            args.sparsity = current_sparsity.item()
             
     if args.local_rank == 0:
         logger.info("Training done, ALL results saved to %s." % args.tmp)
@@ -428,7 +412,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         top1 = AverageMeter()
         top5 = AverageMeter()
 
-        train_loader_len = int(np.ceil(train_loader._size/args.batch_size))
+    train_loader_len = int(np.ceil(train_loader._size/args.batch_size))
     # switch to train mode
     model.train()
     
@@ -441,19 +425,19 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         # measure data loading time
         if args.local_rank == 0:
             data_time.update(time.time() - end)
-
+        
         output = model(data.half() if args.fp16 else data)
         loss = criterion(output, target)
-
+        
         # compute the regularity
         if not finetune:
             sparsity_loss = get_sparsity_loss(model)
             total_loss = loss + l1lambda * sparsity_loss
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        reduced_loss = reduce_tensor(loss.data)
+        reduced_loss = reduce_tensor(loss)
         if not finetune:
-            reduced_reg = reduce_tensor(sparsity_loss.data)
+            reduced_reg = reduce_tensor(sparsity_loss)
         acc1 = reduce_tensor(acc1)
         acc5 = reduce_tensor(acc5)
         
@@ -469,7 +453,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             lr = scheduler.step()
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
-
+        
         # compute gradient and do SGD step
         optimizer.zero_grad()
         if finetune:
@@ -491,27 +475,29 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             end = time.time()
             lr = optimizer.param_groups[0]["lr"]
         
-            if not finetune and (i+1) % 500 == 0:
+        if not finetune and (i+1) % 500 == 0:
+            if args.local_rank == 0:    
                 update_permutation_matrix(model, iters=1)
-                synchronize_model(model)
+            synchronize_model(model)
+        
 
-            if i % args.print_freq == 0:
-                if finetune:
-                    tfboard_writer.add_scalar("finetune/iter-lr", lr, epoch*train_loader_len+i)
-                    logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                                'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
-                                'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \
-                                .format(epoch, args.finetune_epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
-                                        loss=losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
-                else:
-                    tfboard_writer.add_scalar("train/iter-lr", lr, epoch*train_loader_len+i)
-                    logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                                'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
-                                'SLoss {sloss.val:.3f} ({sloss.avg:.3f}) Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
-                                'Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.1e} L1 {l1:.2e}' \
-                                .format(epoch, args.epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
-                                        loss=losses, sloss=sparsity_losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
-            
+        if i % args.print_freq == 0 and args.local_rank == 0:
+            if finetune:
+                tfboard_writer.add_scalar("finetune/iter-lr", lr, epoch*train_loader_len+i)
+                logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                            'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
+                            'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \
+                            .format(epoch, args.finetune_epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
+                                    loss=losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
+            else:
+                tfboard_writer.add_scalar("train/iter-lr", lr, epoch*train_loader_len+i)
+                logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                            'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
+                            'SLoss {sloss.val:.3f} ({sloss.avg:.3f}) Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                            'Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.1e} L1 {l1:.2e}' \
+                            .format(epoch, args.epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
+                                    loss=losses, sloss=sparsity_losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
+    
     train_loader.reset()
     if finetune:
         return losses.avg
@@ -569,8 +555,8 @@ def validate(val_loader, model, epoch):
     if args.local_rank == 0:
         top1 = torch.tensor([top1.avg])
         top5 = torch.tensor([top5.avg])
-        dist.broadcast(top1, 0)
-        dist.broadcast(top5, 0)
+    dist.broadcast(top1, 0)
+    dist.broadcast(top5, 0)
     return top1.item(), top5.item()
 
 def reduce_tensor(tensor):

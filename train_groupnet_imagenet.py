@@ -345,7 +345,7 @@ def main():
     thres = args.sparse_thres
     # if args.local_rank == 0:
     #     logger.info("Prune rate %.3e, threshold %.3e" % (args.percent, thres))
-    group_levels = mask_group(model.module, get_factors(model.module), thres, logger)
+    group_levels = mask_group(model.module, get_factors(model.module), thres, logger=logger if args.local_rank == 0 else None)
 
     if args.local_rank == 0:
         logger.info("evaluating after grouping...")
@@ -455,7 +455,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        if args.fintune_fp16:
+        if args.finetune_fp16:
             optimizer.backward(loss)
         else:
             loss.backward()
@@ -467,7 +467,6 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         # measure elapsed time
         if args.local_rank == 0:
             batch_time.update(time.time() - end)
-            end = time.time()
             lr = optimizer.param_groups[0]["lr"]
         
         if not finetune and (i+1) % 500 == 0:
@@ -485,7 +484,10 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
                         'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \
                         .format(epoch, args.finetune_epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
                                 loss=losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
-    
+        
+        if args.local_rank == 0:
+            end = time.time()
+        
     train_loader.reset()
     loss = torch.tensor([losses.avg]).cuda() if args.local_rank == 0 else torch.tensor([0.]).cuda()
     dist.broadcast(loss, 0)

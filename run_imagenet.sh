@@ -6,4 +6,6 @@ python -m torch.distributed.launch --nproc_per_node=4 train_groupnet_imagenet.py
                                    --use-rec --sparsity "5e-5" \
                                    --sparse-thres "0.1" \
                                    --power "0.3" \
-                                   --warmup "10" 
+                                   --warmup "0" \
+                                   --epochs "1" \
+                                   --finetune-epochs "1"

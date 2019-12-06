@@ -135,8 +135,8 @@ class GroupableConv2d(nn.Conv2d):
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
+        del self.weight, self.penalty, self.template
         self.weight = nn.Parameter(weight)
-        del self.penalty, self.template
     
     def forward(self, x):
         if self.real_grouped:

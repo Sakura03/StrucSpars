@@ -77,7 +77,7 @@ def update_permutation_matrix(model, iters=1):
     print("Update permutation matrices for %d iters, elapsed time: %.3f" % (iters, time.time()-start))
 
 @torch.no_grad()
-def mask_group(model, factors, thres, logger):
+def mask_group(model, factors, thres, logger=None):
     group_levels = {}
     total_connections = 0
     remaining_connections = 0
@@ -90,9 +90,11 @@ def mask_group(model, factors, thres, logger):
             mask = m.mask_group()
             total_connections += mask.numel()
             remaining_connections += mask.sum()
-            logger.info("Layer %s total connections %d (remaining %d)" % (name, mask.numel(), mask.sum()))
-    logger.info("--------------------> %d of %d connections remained, remaining rate %f <--------------------" % \
-               (remaining_connections, total_connections, float(remaining_connections)/total_connections))
+            if logger is not None:
+                logger.info("Layer %s total connections %d (remaining %d)" % (name, mask.numel(), mask.sum()))
+    if logger is not None:
+        logger.info("--------------------> %d of %d connections remained, remaining rate %f <--------------------" % \
+                   (remaining_connections, total_connections, float(remaining_connections)/total_connections))
     return group_levels
 
 @torch.no_grad()
@@ -107,10 +109,16 @@ def synchronize_model(model):
         if isinstance(m, GroupableConv2d):
             m.P_t = torch.from_numpy(m.P).cuda()
             m.Q_t = torch.from_numpy(m.Q).cuda()
+            m.Pinv_t = torch.from_numpy(m.P_inv).cuda()
+            m.Qinv_t = torch.from_numpy(m.Q_inv).cuda()
             dist.broadcast(m.P_t, 0)
             dist.broadcast(m.Q_t, 0)
+            dist.broadcast(m.Pinv_t, 0)
+            dist.broadcast(m.Qinv_t, 0)
             dist.broadcast(m.penalty, 0)
 
             m.P = m.P_t.cpu().numpy()
             m.Q = m.Q_t.cpu().numpy()
-            del m.P_t, m.Q_t
+            m.P_inv = m.Pinv_t.cpu().numpy()
+            m.Q_inv = m.Qinv_t.cpu().numpy()
+            del m.P_t, m.Q_t, m.Pinv_t, m.Qinv_t

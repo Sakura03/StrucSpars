@@ -104,6 +104,8 @@ class GroupableConv2d(nn.Conv2d):
             if loss1 == loss2: break
         
         self.P_inv, self.Q_inv = np.argsort(self.P), np.argsort(self.Q)
+        self.shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
+        self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
     
     @torch.no_grad()
     def compute_regularity(self):
@@ -113,9 +115,7 @@ class GroupableConv2d(nn.Conv2d):
     
     @torch.no_grad()
     def impose_regularity(self, l1lambda):
-        shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
-        shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
-        self.weight.grad.add_(l1lambda * (torch.sign(self.weight.data) * shuffled_penalty))
+        self.weight.grad.add_(l1lambda * (torch.sign(self.weight.data) * self.shuffled_penalty))
     
     @torch.no_grad()
     def mask_group(self):

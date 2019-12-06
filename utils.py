@@ -116,6 +116,7 @@ def synchronize_model(model):
             dist.broadcast(m.Pinv_t, 0)
             dist.broadcast(m.Qinv_t, 0)
             dist.broadcast(m.penalty, 0)
+            dist.broadcast(m.shuffled_penalty, 0)
 
             m.P = m.P_t.cpu().numpy()
             m.Q = m.Q_t.cpu().numpy()

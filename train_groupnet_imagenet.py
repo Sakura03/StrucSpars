@@ -56,7 +56,7 @@ parser.add_argument('--sparsity', type=float, default=1e-5, help='sparsity regul
 parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
 parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
 parser.add_argument('--finetune-lr', type=int, default=1e-1, help="finetune lr")
-parser.add_argument('--finetune-epochs', type=int, default=160, help="finetune epochs")
+parser.add_argument('--finetune-epochs', type=int, default=110, help="finetune epochs")
 parser.add_argument('--finetune-milestones', type=eval, default=[30, 60, 90], help="finetune milestones")
 parser.add_argument('--init-iters', type=int, default=50, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=20, help='Iterations for each epoch')
@@ -193,7 +193,7 @@ def main():
 
     if args.fp16:
         model = BN_convert_float(model.half())
-    model = DDP(model, delay_allreduce=False) # torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+    model = DDP(model, delay_allreduce=False)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     if args.local_rank == 0:
@@ -435,7 +435,6 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         
         output = model(data)
         loss = criterion(output, target)
-        
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         reduced_loss = reduce_tensor(loss)
@@ -463,7 +462,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             impose_group_lasso(model, l1lambda)
         optimizer.step()
         
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         # measure elapsed time
         if args.local_rank == 0:
             batch_time.update(time.time() - end)

@@ -69,6 +69,8 @@ class GroupableConv2d(nn.Conv2d):
         self.P, self.P_inv = np.arange(self.out_channels), np.arange(self.out_channels)
         self.Q, self.Q_inv = np.arange(self.in_channels), np.arange(self.in_channels)
         self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3))
+        self.register_buffer("shuffled_penalty",  self.penalty[self.P_inv, :][:, self.Q_inv])
+        self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
         self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=0.3).numpy().astype(np.float64)
     
     @torch.no_grad()
@@ -135,7 +137,7 @@ class GroupableConv2d(nn.Conv2d):
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
-        del self.weight, self.penalty, self.template
+        del self.weight, self.penalty, self.template, self.shuffled_penalty
         self.weight = nn.Parameter(weight)
     
     def forward(self, x):

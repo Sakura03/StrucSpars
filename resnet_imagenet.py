@@ -84,6 +84,8 @@ class GroupableConv2d(nn.Conv2d):
         if self.group_level != group_level:
             self.group_level = group_level
             self.penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3).to(self.weight.device)
+            self.shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
+            self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
     
     @torch.no_grad()
     def update_PQ(self, iters):
@@ -126,7 +128,6 @@ class GroupableConv2d(nn.Conv2d):
         self.permuted_mask = mask[self.P_inv, :][:, self.Q_inv]
         self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
         self.weight.data *= self.permuted_mask
-        return self.permuted_mask
     
     @torch.no_grad()
     def real_group(self):

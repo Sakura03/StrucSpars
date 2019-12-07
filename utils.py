@@ -1,5 +1,4 @@
-import time, torch, multiprocessing
-import numpy as np
+import time, torch
 import torch.distributed as dist
 from resnet_imagenet import GroupableConv2d, get_penalty_matrix
 
@@ -9,13 +8,15 @@ def get_level(matrix, thres):
     penalty = get_penalty_matrix(matrix.size(0), matrix.size(1))
     u = torch.unique(penalty, sorted=True)
     sums = [torch.sum(matrix)]
-    for level in range(1, u.size(0)):
-        mask = (penalty == u[-level])
+    for i in range(1, u.size(0)):
+        mask = (penalty == u[-i])
         matrix[mask] = 0.
         sums.append(torch.sum(matrix))
-        if sums[-1] / sums[-2] <= 1. / (1. + thres):
+    percents = [s / (sums[0]+1e-12) for s in sums]
+    for level, s in enumerate(percents):
+        if s < 1. - thres:
             break
-    return level
+    return level, percents
 
 @torch.no_grad()
 def get_factors(model):
@@ -31,7 +32,7 @@ def get_sparsity(factors, thres):
     total0 = 0
     total = 0
     for v in factors.values():
-        total0 += v.numel() / (2 ** (get_level(v, thres)-1))
+        total0 += v.numel() / (2 ** (get_level(v, thres)[0]-1))
         total += v.numel()
     return 1. - float(total0) / total
 
@@ -79,22 +80,16 @@ def update_permutation_matrix(model, iters=1):
 @torch.no_grad()
 def mask_group(model, factors, thres, logger=None):
     group_levels = {}
-    total_connections = 0
-    remaining_connections = 0
     for name, m in model.named_modules():
         if isinstance(m, GroupableConv2d):
-            level = get_level(factors[name], thres)
+            level, percents = get_level(factors[name], thres)
             group_levels[name] = level
             
             m.set_group_level(level)
-            mask = m.mask_group()
-            total_connections += mask.numel()
-            remaining_connections += mask.sum()
+            m.mask_group()
             if logger is not None:
-                logger.info("Layer %s total connections %d (remaining %d)" % (name, mask.numel(), mask.sum()))
-    if logger is not None:
-        logger.info("--------------------> %d of %d connections remained, remaining rate %f <--------------------" % \
-                   (remaining_connections, total_connections, float(remaining_connections)/total_connections))
+                logger.info("Layer %s, weight size %s, group level %d, percents: %s" % \
+                            (name, str(list(m.weight.size())), level, str(percents)))
     return group_levels
 
 @torch.no_grad()

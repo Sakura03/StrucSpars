@@ -48,6 +48,7 @@ def get_sparsity_loss(model):
             loss += m.compute_regularity()
     return loss
 
+@torch.no_grad()
 def impose_group_lasso(model, l1lambda):
     for m in model.modules():
         if isinstance(m, GroupableConv2d):

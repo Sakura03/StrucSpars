@@ -5,8 +5,8 @@ from os.path import join, isfile, abspath
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, cifar10, cifar100
 from torch.optim.lr_scheduler import MultiStepLR
 from resnet_cifar import GroupableConv2d
-from utils_cifar import get_factors, get_sparsity, get_sparsity_loss, get_threshold
-from utils_cifar import set_group_levels, update_permutation_matrix, mask_group, real_group
+from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold, impose_group_lasso
+from utils import set_group_levels, update_permutation_matrix, mask_group, real_group
 import resnet_cifar
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
@@ -121,12 +121,15 @@ def main():
         tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=-1)
     for epoch in range(args.start_epoch, args.epochs):
         # train and evaluate
-        loss, sloss = train(train_loader, model, optimizer, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
+        loss = train(train_loader, model, optimizer, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
         acc1, acc5 = validate(val_loader, model, epoch)
         if not args.fix_lr:
             scheduler.step()
 
         update_permutation_matrix(model, iters=args.epoch_iters)
+        
+        # compute the regularity
+        sloss = get_sparsity_loss(model)
         
         # calculate FLOPs and params
         m = eval(model_name).cuda()
@@ -161,20 +164,17 @@ def main():
             expected_sparsity_gain = (target_sparsity - model_sparsity) / (args.epochs - epoch)
             if epoch >= args.warmup:
                 # not sparse enough
-                if model_sparsity < target_sparsity:
-                    # 1st order
-                    if sparsity_gain < expected_sparsity_gain:
-                        logger.info("Sparsity gain %f (expected %f), increasing sparse penalty."%(sparsity_gain, expected_sparsity_gain))
-                        args.sparsity += args.delta_lambda
+                if model_sparsity < target_sparsity and sparsity_gain < expected_sparsity_gain:
+                    logger.info("Sparsity gain %f (expected %f), increasing the sparsity penalty." % (sparsity_gain, expected_sparsity_gain))
+                    args.sparsity += args.delta_lambda
                 # over sparse
-                elif model_sparsity > target_sparsity:
-                    if model_sparsity > last_sparsity and args.sparsity > 0:
-                        args.sparsity -= args.delta_lambda
+                elif model_sparsity >= target_sparsity:
+                    args.sparsity -= args.delta_lambda
                 # minimal sparsity=0
                 args.sparsity = max(args.sparsity, 0)
             logger.info("Model sparsity=%f (last=%f, target=%f), args.sparsity=%f" % (model_sparsity, last_sparsity, target_sparsity, args.sparsity))
             last_sparsity = model_sparsity
-        
+                
         tfboard_writer.add_scalar('train/loss_epoch', loss, epoch)
         tfboard_writer.add_scalar('train/sloss_epoch', sloss, epoch)
         tfboard_writer.add_scalar('train/lr_epoch', optimizer.param_groups[0]["lr"], epoch)
@@ -197,7 +197,7 @@ def main():
     # mask grouping
     # thres = get_threshold(model.module, args.percent)
     thres = args.sparse_thres
-    logger.info("Prune rate %.3E, threshold %.3E" % (args.percent, thres))
+    # logger.info("Prune rate %.3E, threshold %.3E" % (args.percent, thres))
     group_levels = mask_group(model.module, get_factors(model.module), thres, logger)
 
     logger.info("evaluating after grouping...")
@@ -250,12 +250,10 @@ def main():
                 'optimizer' : optimizer.state_dict()
                 }, is_best, path=args.tmp, filename="checkpoint-finetune.pth")
 
-def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
+def train(train_loader, model, optimizer, epoch, l1lambda=0., finetune=False):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
-    if not finetune:
-        sparsity_losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
@@ -271,24 +269,16 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
         output = model(data)
         loss = criterion(output, target)
 
-        # update the permutation matrices and compute the regularity
-        if not finetune:
-            sparsity_loss = get_sparsity_loss(model)
-            total_loss = loss + l1lambda * sparsity_loss
-
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), data.size(0))
-        if not finetune:
-            sparsity_losses.update(sparsity_loss.item(), data.size(0))
         top1.update(acc1.item(), data.size(0))
         top5.update(acc5.item(), data.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        if finetune:
-            loss.backward()
-        else:
-            total_loss.backward()
+        loss.backward()
+        if not finetune and l1lambda > 0.:
+            impose_group_lasso(model, l1lambda)
         optimizer.step()
         
         # measure elapsed time
@@ -299,24 +289,13 @@ def train(train_loader, model, optimizer, epoch, l1lambda=0, finetune=False):
             update_permutation_matrix(model, iters=1)
 
         if i % args.print_freq == 0:
-            if finetune:
-                logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+            logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                             'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
                             'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \
                             .format(epoch, args.finetune_epochs, i, len(train_loader), batch_time=batch_time, data_time=data_time,
                                     loss=losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
-            else:
-                logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                            'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
-                            'SLoss {sloss.val:.3f} ({sloss.avg:.3f}) Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
-                            'Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.1e} L1 {l1:.2e}' \
-                            .format(epoch, args.epochs, i, len(train_loader), batch_time=batch_time, data_time=data_time,
-                                    loss=losses, sloss=sparsity_losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
         end = time.time()
-    if finetune:
-        return losses.avg
-    else:
-        return losses.avg, sparsity_losses.avg
+    return losses.avg
 
 def validate(val_loader, model, epoch):
     batch_time = AverageMeter()

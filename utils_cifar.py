@@ -8,13 +8,15 @@ def get_level(matrix, thres):
     penalty = get_penalty_matrix(matrix.size(0), matrix.size(1))
     u = torch.unique(penalty, sorted=True)
     sums = [torch.sum(matrix)]
-    for level in range(1, u.size(0)):
-        mask = (penalty == u[-level])
+    for i in range(1, u.size(0)):
+        mask = (penalty == u[-i])
         matrix[mask] = 0.
         sums.append(torch.sum(matrix))
-        if sums[-1] / sums[-2] <= 1. / (1. + thres):
+    percents = [s / (sums[0]+1e-12) for s in sums]
+    for level, s in enumerate(percents):
+        if s < 1. - thres:
             break
-    return level
+    return level, percents
 
 @torch.no_grad()
 def get_factors(model):
@@ -30,7 +32,7 @@ def get_sparsity(factors, thres):
     total0 = 0
     total = 0
     for v in factors.values():
-        total0 += v.numel() / (2 ** (get_level(v, thres)-1))
+        total0 += v.numel() / (2 ** (get_level(v, thres)[0]-1))
         total += v.numel()
     return 1. - float(total0) / total
 
@@ -38,12 +40,19 @@ def get_sparsity(factors, thres):
 def get_sparsity_from_model(model, thres):
     return get_sparsity(get_factors(model), thres)
 
+@torch.no_grad()
 def get_sparsity_loss(model):
     loss = 0
     for m in model.modules():
         if isinstance(m, GroupableConv2d):
             loss += m.compute_regularity()
     return loss
+
+@torch.no_grad()
+def impose_group_lasso(model, l1lambda):
+    for m in model.modules():
+        if isinstance(m, GroupableConv2d):
+            m.impose_regularity(l1lambda)
             
 @torch.no_grad()
 def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.001):
@@ -62,45 +71,26 @@ def set_group_levels(model, group_levels):
         if isinstance(m, GroupableConv2d):
             m.set_group_level(group_levels[name])
 
-def update_one_module(module, iters, name):
-    P, Q = module.update_PQ(iters)
-    # print("Update permutation matrix of %s" % name)
-    return P, Q
-
 def update_permutation_matrix(model, iters=1):
     start = time.time()
-    model.cpu()
-    pool = multiprocessing.Pool(processes=8)
-    results = {}
     for name, m in model.named_modules():
         if isinstance(m, GroupableConv2d):
-            results[name] = pool.apply_async(update_one_module, args=(m, iters, name, ))
-    pool.close()
-    pool.join()
-        
-    for name, m in model.named_modules():
-        if isinstance(m, GroupableConv2d):
-            m.P, m.Q = results[name].get()
-    model.cuda()
+            m.update_PQ(iters)
     print("Update permutation matrices for %d iters, elapsed time: %.3f" % (iters, time.time()-start))
 
 @torch.no_grad()
-def mask_group(model, factors, thres, logger):
+def mask_group(model, factors, thres, logger=None):
     group_levels = {}
-    total_connections = 0
-    remaining_connections = 0
     for name, m in model.named_modules():
         if isinstance(m, GroupableConv2d):
-            level = get_level(factors[name], thres)
+            level, percents = get_level(factors[name], thres)
             group_levels[name] = level
             
             m.set_group_level(level)
-            mask = m.mask_group()
-            total_connections += mask.numel()
-            remaining_connections += mask.sum()
-            logger.info("Layer %s total connections %d (remaining %d)" % (name, mask.numel(), mask.sum()))
-    logger.info("--------------------> %d of %d connections remained, remaining rate %f <--------------------" % \
-               (remaining_connections, total_connections, float(remaining_connections)/total_connections))
+            m.mask_group()
+            if logger is not None:
+                logger.info("Layer %s, weight size %s, group level %d, percents: %s" % \
+                            (name, str(list(m.weight.size())), level, str(percents)))
     return group_levels
 
 @torch.no_grad()

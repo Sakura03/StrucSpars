@@ -50,60 +50,68 @@ class GroupableConv2d(nn.Conv2d):
                                               stride=stride, padding=padding, dilation=dilation, bias=bias)
         self.group_level = 1
         self.mask_grouped, self.real_grouped = False, False
-        self.P = np.arange(self.out_channels)
-        self.Q = np.arange(self.in_channels)
+        self.P, self.P_inv = np.arange(self.out_channels), np.arange(self.out_channels)
+        self.Q, self.Q_inv = np.arange(self.in_channels), np.arange(self.in_channels)
         self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3))
+        self.register_buffer("shuffled_penalty",  self.penalty[self.P_inv, :][:, self.Q_inv])
+        self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
         self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=0.3).numpy().astype(np.float64)
     
+    @torch.no_grad()
     def matrix2idx(self, P, row=True):
         idx = np.argmax(P, axis=1 if row else 0)
         assert np.all(np.bincount(idx) == 1), "Invalid permutation matrix."
         return idx 
     
+    @torch.no_grad()
     def set_group_level(self, group_level):
         if self.group_level != group_level:
             self.group_level = group_level
             self.penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3).to(self.weight.device)
-        
+            self.shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
+            self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
+    
+    @torch.no_grad()
     def update_PQ(self, iters):
         ones_P, ones_Q = np.ones((self.out_channels, ), dtype=np.float64), np.ones((self.in_channels, ), dtype=np.float64)
-        weight = self.weight.data.numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
+        weight = self.weight.data.cpu().numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
         weight_norm = np.linalg.norm(weight, ord=1, axis=-1)
-        # loss0 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
-        Q = self.Q
         
         for _ in range(iters):
-            permutated_weight_norm = weight_norm[:, Q]
+            permutated_weight_norm = weight_norm[:, self.Q]
             M = np.matmul(self.template, permutated_weight_norm.T)
             P = ot.emd(ones_P, ones_P, M)
-            P = self.matrix2idx(P, row=True)
-            loss1 = np.sum(weight_norm[P, :][:, Q] * self.template)
+            self.P = self.matrix2idx(P, row=True)
+            loss1 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
             
-            permutated_weight_norm = weight_norm[P, :]
+            permutated_weight_norm = weight_norm[self.P, :]
             M = np.matmul(permutated_weight_norm.T, self.template)
             Q = ot.emd(ones_Q, ones_Q, M)
-            Q = self.matrix2idx(Q, row=False)
-            loss2 = np.sum(weight_norm[P, :][:, Q] * self.template)
-            # print("%.8f->%.8f->%.8f" % (loss0, loss1, loss2))
+            self.Q = self.matrix2idx(Q, row=False)
+            loss2 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
             if loss1 == loss2: break
-            # loss0 = loss2
-        return P, Q
+        
+        self.P_inv, self.Q_inv = np.argsort(self.P), np.argsort(self.Q)
+        self.shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
+        self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
     
+    @torch.no_grad()
     def compute_regularity(self):
         weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
         shuffled_weight_norm = weight_norm[self.P, :][:, self.Q]
         return torch.sum(shuffled_weight_norm * self.penalty)
     
     @torch.no_grad()
+    def impose_regularity(self, l1lambda):
+        self.weight.grad.add_(l1lambda * (torch.sign(self.weight.data) * self.shuffled_penalty))
+    
+    @torch.no_grad()
     def mask_group(self):
         self.mask_grouped = True
         mask = get_mask_from_level(self.group_level, self.out_channels, self.in_channels)
-        P_inv = np.argsort(self.P)
-        Q_inv = np.argsort(self.Q)
-        self.permuted_mask = mask[P_inv, :][:, Q_inv]
+        self.permuted_mask = mask[self.P_inv, :][:, self.Q_inv]
         self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
         self.weight.data *= self.permuted_mask
-        return self.permuted_mask
     
     @torch.no_grad()
     def real_group(self):
@@ -114,9 +122,8 @@ class GroupableConv2d(nn.Conv2d):
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
+        del self.weight, self.penalty, self.template, self.shuffled_penalty
         self.weight = nn.Parameter(weight)
-        self.P_inv = np.argsort(self.P)
-        del self.penalty, self.template
     
     def forward(self, x):
         if self.real_grouped:

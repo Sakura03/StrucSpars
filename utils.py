@@ -1,17 +1,17 @@
 import time, torch
 import torch.distributed as dist
-from resnet_imagenet import GroupableConv2d, get_penalty_matrix
+from resnet_cifar import GroupableConv2d, get_penalty_matrix
 
 @torch.no_grad()
 def get_level(matrix, thres):
     matrix = matrix.clone()
     penalty = get_penalty_matrix(matrix.size(0), matrix.size(1))
     u = torch.unique(penalty, sorted=True)
-    sums = [torch.sum(matrix)]
+    sums = [torch.sum(matrix).item()]
     for i in range(1, u.size(0)):
         mask = (penalty == u[-i])
         matrix[mask] = 0.
-        sums.append(torch.sum(matrix))
+        sums.append(torch.sum(matrix).item())
     percents = [s / (sums[0]+1e-12) for s in sums]
     for level, s in enumerate(percents):
         if s < 1. - thres:
@@ -89,8 +89,11 @@ def mask_group(model, factors, thres, logger=None):
             m.set_group_level(level)
             m.mask_group()
             if logger is not None:
-                logger.info("Layer %s, weight size %s, group level %d, percents: %s" % \
-                            (name, str(list(m.weight.size())), level, str(percents)))
+                info = "Layer %s, weight size %s, group level %d, percents:" % \
+                        (name, str(list(m.weight.size())), level)
+                for p in percents:
+                    info += " %.3f" % p
+                logger.info(info)
     return group_levels
 
 @torch.no_grad()

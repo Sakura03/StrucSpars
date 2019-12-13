@@ -53,7 +53,7 @@ def assign_location(tensor, num, level, power):
 
 @torch.no_grad()
 def get_mask_from_level(level, dim1, dim2):
-    mask = torch.ones(dim1, dim2).cuda()
+    mask = torch.ones(dim1, dim2)
     penalty = get_penalty_matrix(dim1, dim2, level-1)
     u = torch.unique(penalty, sorted=True)
     for i in range(1, level):
@@ -61,38 +61,54 @@ def get_mask_from_level(level, dim1, dim2):
     return mask
 
 class GroupableConv2d(nn.Conv2d):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
+    r"""
+    attributes of `GroupableConv2d`:
+        a) `group_level` indicates the number of groups that can be achieved currently;
+        b) `power` indicates the decay power of the attribute `template`;
+        c) `mask_grouped` and `real_grouped` indicate whether `mask_group` or `real_group` has been called, respectively;
+        d) `P`, `Q`, `P_inv`, `Q_inv` indicate the row and column permutation matrices and their inverses, respectively;
+        e) `shuffled_penalty` indicates the row- and column-shuffled penalty matrix (which depends on `P`, `Q`, `power`, and `group_level`) (shape: [C_out, C_in , 1, 1]);
+        f) `template` indicates the penalty matrix when computing the optimal permutations `P` and `Q`;
+        g) `permutated_mask` indicates the row- and column-shuffled mask matrix after `mask_group`.
+    
+    methods of `GroupableConv2d`:
+        a) `set_group_level` receives the current group level, and set the current `group_level` and `shuffled_penalty` accordingly;
+        b) `update_PQ` receives the number of iterations, and update the permutations `P`, `Q`, `P_inv`, `Q_inv`, and `shuffled_penalty`;
+        c) `compute_regularity` computes the sparsity regularity according to the current `shuffled_penalty`;
+        d) `impose_regularity` imposes L1-penalty on the conv weights directly, according to the current `shuffled_penalty`;
+        e) `mask_group` creates `permutated_mask` and mask the conv weights according to the current `group_level` attribute;
+        f) `real_group` actually sets the attribute `groups`, and prunes the conv weights
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True, power=0.3):
         super(GroupableConv2d, self).__init__(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
                                               stride=stride, padding=padding, dilation=dilation, bias=bias)
         self.group_level = 1
+        self.power = power
         self.mask_grouped, self.real_grouped = False, False
         self.P, self.P_inv = np.arange(self.out_channels), np.arange(self.out_channels)
         self.Q, self.Q_inv = np.arange(self.in_channels), np.arange(self.in_channels)
-        self.register_buffer("penalty", get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3))
-        self.register_buffer("shuffled_penalty",  self.penalty[self.P_inv, :][:, self.Q_inv])
+        penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power)
+        self.register_buffer("shuffled_penalty", penalty[self.P_inv, :][:, self.Q_inv])
         self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
-        self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=0.3).numpy().astype(np.float64)
-    
-    @torch.no_grad()
+        self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=self.power).numpy().astype(np.float64)
+
     def matrix2idx(self, P, row=True):
         idx = np.argmax(P, axis=1 if row else 0)
         assert np.all(np.bincount(idx) == 1), "Invalid permutation matrix."
         return idx 
     
-    @torch.no_grad()
     def set_group_level(self, group_level):
         if self.group_level != group_level:
             self.group_level = group_level
-            self.penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=0.3).to(self.weight.device)
-            self.shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
+            penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
+            self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
             self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
     
-    @torch.no_grad()
     def update_PQ(self, iters):
         ones_P, ones_Q = np.ones((self.out_channels, ), dtype=np.float64), np.ones((self.in_channels, ), dtype=np.float64)
         weight = self.weight.data.cpu().numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
         weight_norm = np.linalg.norm(weight, ord=1, axis=-1)
-        
+
         for _ in range(iters):
             permutated_weight_norm = weight_norm[:, self.Q]
             M = np.matmul(self.template, permutated_weight_norm.T)
@@ -108,37 +124,33 @@ class GroupableConv2d(nn.Conv2d):
             if loss1 == loss2: break
         
         self.P_inv, self.Q_inv = np.argsort(self.P), np.argsort(self.Q)
-        self.shuffled_penalty = self.penalty[self.P_inv, :][:, self.Q_inv]
+        penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
+        self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
         self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
     
-    @torch.no_grad()
     def compute_regularity(self):
         weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
-        shuffled_weight_norm = weight_norm[self.P, :][:, self.Q]
-        return torch.sum(shuffled_weight_norm * self.penalty)
+        return torch.sum(weight_norm * self.shuffled_penalty.squeeze())
     
-    @torch.no_grad()
     def impose_regularity(self, l1lambda):
         self.weight.grad.add_(l1lambda * (torch.sign(self.weight.data) * self.shuffled_penalty))
     
-    @torch.no_grad()
     def mask_group(self):
         self.mask_grouped = True
-        mask = get_mask_from_level(self.group_level, self.out_channels, self.in_channels)
+        mask = get_mask_from_level(self.group_level, self.out_channels, self.in_channels).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
         self.permuted_mask = mask[self.P_inv, :][:, self.Q_inv]
         self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
         self.weight.data *= self.permuted_mask
     
-    @torch.no_grad()
     def real_group(self):
         self.real_grouped = True
         self.groups = 2 ** (self.group_level-1)
-        weight = torch.zeros(self.out_channels, self.in_channels // self.groups, *self.kernel_size).to(self.weight.data.device)
+        weight = torch.zeros(self.out_channels, self.in_channels // self.groups, *self.kernel_size).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
         split_out, split_in = self.out_channels // self.groups, self.in_channels // self.groups
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
-        del self.weight, self.penalty, self.template, self.shuffled_penalty
+        del self.weight, self.template, self.shuffled_penalty
         self.weight = nn.Parameter(weight)
     
     def forward(self, x):
@@ -153,14 +165,14 @@ class GroupableConv2d(nn.Conv2d):
             out = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
         return out
 
-def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1, groupable=True):
+def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1, groupable=True, power=0.3):
     """3x3 convolution with padding"""
-    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=dilation, bias=False, dilation=dilation) if groupable \
+    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=dilation, bias=False, dilation=dilation, power=power) if groupable \
            else nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=dilation, groups=groups, bias=False, dilation=dilation)
 
-def conv1x1(in_planes, out_planes, stride=1, groupable=False):
+def conv1x1(in_planes, out_planes, stride=1, groupable=False, power=0.3):
     """1x1 convolution"""
-    return GroupableConv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False) if groupable \
+    return GroupableConv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False, power=power) if groupable \
            else nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 class BasicBlock(nn.Module):
@@ -168,7 +180,7 @@ class BasicBlock(nn.Module):
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
                  base_width=64, dilation=1, norm_layer=None, group1x1=False,
-                 group3x3=True):
+                 group3x3=True, power=0.3):
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -177,10 +189,10 @@ class BasicBlock(nn.Module):
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv3x3(inplanes, planes, stride, groupable=group3x3)
+        self.conv1 = conv3x3(inplanes, planes, stride, groupable=group3x3, power=power)
         self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes, groupable=group3x3)
+        self.conv2 = conv3x3(planes, planes, groupable=group3x3, power=power)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
@@ -209,17 +221,17 @@ class Bottleneck(nn.Module):
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
                  base_width=64, dilation=1, norm_layer=None, group1x1=False,
-                 group3x3=True):
+                 group3x3=True, power=0.3):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv1x1(inplanes, width, groupable=group1x1)
+        self.conv1 = conv1x1(inplanes, width, groupable=group1x1, power=power)
         self.bn1 = norm_layer(width)
-        self.conv2 = conv3x3(width, width, stride, groups, dilation, groupable=group3x3)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation, groupable=group3x3, power=power)
         self.bn2 = norm_layer(width)
-        self.conv3 = conv1x1(width, planes * self.expansion, groupable=group1x1)
+        self.conv3 = conv1x1(width, planes * self.expansion, groupable=group1x1, power=power)
         self.bn3 = norm_layer(planes * self.expansion)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
@@ -252,7 +264,7 @@ class ResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None, group1x1=False, group3x3=True):
+                 norm_layer=None, group1x1=False, group3x3=True, power=0.3):
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -260,6 +272,7 @@ class ResNet(nn.Module):
 
         self.inplanes = 64
         self.dilation = 1
+        self.power = power
         self.group1x1 = group1x1
         self.group3x3 = group3x3
         if replace_stride_with_dilation is None:
@@ -312,20 +325,20 @@ class ResNet(nn.Module):
             stride = 1
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride, groupable=self.group1x1),
+                conv1x1(self.inplanes, planes * block.expansion, stride, groupable=self.group1x1, power=self.power),
                 norm_layer(planes * block.expansion),
             )
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
                             self.base_width, previous_dilation, norm_layer,
-                            group1x1=self.group1x1, group3x3=self.group3x3))
+                            group1x1=self.group1x1, group3x3=self.group3x3, power=self.power))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
                                 norm_layer=norm_layer, group1x1=self.group1x1,
-                                group3x3=self.group3x3))
+                                group3x3=self.group3x3, power=self.power))
 
         return nn.Sequential(*layers)
 

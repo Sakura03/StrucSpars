@@ -1,9 +1,10 @@
 import torch, os, argparse, time, warnings
 import numpy as np
+from PIL import Image
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, MultiStepLR
 from resnet_imagenet import GroupableConv2d
-from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold, synchronize_model
+from utils import get_penalties, get_factors, get_sparsity, get_sparsity_loss, get_threshold, synchronize_model
 from utils import set_group_levels, update_permutation_matrix, mask_group, real_group, impose_group_lasso
 import resnet_imagenet
 from tensorboardX import SummaryWriter
@@ -18,6 +19,7 @@ import torch.distributed as dist
 from apex.parallel import DistributedDataParallel as DDP
 from apex.fp16_utils import FP16_Optimizer, BN_convert_float
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
+warnings.simplefilter('error')
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
@@ -113,7 +115,7 @@ class HybridValPipe(Pipeline):
         super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
         if args.use_rec:
             self.input = ops.MXNetReader(path=join(data_dir, "val.rec"), index_path=join(data_dir, "val.idx"),
-                                     random_shuffle=True, shard_id=args.local_rank, num_shards=args.world_size)
+                                     random_shuffle=False, shard_id=args.local_rank, num_shards=args.world_size)
         else:
             self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
         self.decode = ops.ImageDecoder(device="mixed", output_type=types.RGB)
@@ -182,7 +184,7 @@ def main():
     
     # model and optimizer
     group1x1 = "True" if args.group1x1 else "False"
-    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
+    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")
@@ -190,6 +192,10 @@ def main():
         flops, params = profile(model, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
         tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
         tfboard_writer.add_scalar("train/Params", params, global_step=-1)
+
+        for name, m in model.named_modules():
+            if isinstance(m, GroupableConv2d):
+                os.makedirs(join(args.tmp, "imgs", name), exist_ok=True)
 
     if args.fp16:
         model = BN_convert_float(model.half())
@@ -233,16 +239,39 @@ def main():
     scheduler = None if args.fix_lr else \
                 MultiStepLR(loader_len=train_loader_len, milestones=args.milestones,
                             gamma=args.gamma, warmup_epochs=args.warmup)
-
+    
     if args.local_rank == 0:
+        # log initial factors and penalties
+        factors = get_factors(model.module)
+        penalties = get_penalties(model.module)
+        for k in factors.keys():
+            f = factors[k] / (factors[k].max()+1e-8)
+            p = penalties[k]
+            canvas = torch.cat((f, torch.ones(f.size(0), f.size(1)//4).to(device=f.device), p), dim=1)
+            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-2)
+            
+            img = Image.fromarray(canvas.mul(255.).cpu().numpy()).convert('L')
+            img.save(join(args.tmp, "imgs", k, "before-permutation.png"))
+
+        # initially update permutation matrices P and Q
         update_permutation_matrix(model, iters=args.init_iters)
     synchronize_model(model)
         
     if args.local_rank == 0:
+        # log factors and penalties after permutation
         factors = get_factors(model.module)
-        last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
-        for k, v in factors.items():
-            tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=-1)
+        penalties = get_penalties(model.module)
+        if args.adjust_lambda:
+            last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
+        for k in factors.keys():
+            f = factors[k] / (factors[k].max()+1e-8)
+            p = penalties[k]
+            canvas = torch.cat((f, torch.ones(f.size(0), f.size(1)//4).to(device=f.device), p), dim=1)
+            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-1)
+            
+            img = Image.fromarray(canvas.mul(255.).cpu().numpy()).convert('L')
+            img.save(join(args.tmp, "imgs", k, "after-permutation.png"))
+
     for epoch in range(args.start_epoch, args.epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer, scheduler, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
@@ -253,21 +282,21 @@ def main():
             update_permutation_matrix(model, iters=args.epoch_iters)
             
             # compute the regularity
-            sloss = get_sparsity_loss(model)
+            sloss = get_sparsity_loss(model, enable_grad=False)
 
-            # calculate FLOPs and params
+            # calculate sparsity, FLOPs, and params
             m = eval(model_name).cuda()
             factors = get_factors(model.module)
+            penalties = get_penalties(model.module)
             group_levels = mask_group(m, factors, args.sparse_thres, logger)
             real_group(m)
             set_group_levels(model.module, group_levels)
             
+            model_sparsity = get_sparsity(factors, thres=args.sparse_thres)
             flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
             del m
             torch.cuda.empty_cache()
-            logger.info("%.3e FLOPs, %.3e params" % (flops, params))
-            tfboard_writer.add_scalar("train/FLOPs", flops, epoch)
-            tfboard_writer.add_scalar("train/Params", params, epoch)
+            logger.info("Sparsity %.6f, %.3e FLOPs, %.3e params" % (model_sparsity, flops, params))
 
             # remember best prec@1 and save checkpoint
             is_best = acc1 > best_acc1
@@ -291,8 +320,7 @@ def main():
                         }, is_best=False, path=args.tmp, filename="checkpoint-epoch%d.pth"%epoch)
             logger.info("Best acc1=%.5f" % best_acc1)
             
-            # get model sparsity and optionally adjust l1lambda
-            model_sparsity = get_sparsity(factors, thres=args.sparse_thres)
+            # optionally adjust l1lambda
             if args.adjust_lambda:
                 target_sparsity = args.percent
                 sparsity_gain = (model_sparsity - last_sparsity)
@@ -318,7 +346,10 @@ def main():
             args.sparsity = current_sparsity.cpu().item()
             del current_sparsity
         
+        # add scalars and images to tensorboard
         if args.local_rank == 0:
+            tfboard_writer.add_scalar("train/FLOPs", flops, epoch)
+            tfboard_writer.add_scalar("train/Params", params, epoch)
             tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
             tfboard_writer.add_scalar('train/sloss-epoch', sloss, epoch)
             tfboard_writer.add_scalar('train/lr-epoch', optimizer.param_groups[0]["lr"], epoch)
@@ -327,9 +358,18 @@ def main():
             tfboard_writer.add_scalar('test/acc1-epoch', acc1, epoch)
             tfboard_writer.add_scalar('test/acc5-epoch', acc5, epoch)
             
-            for k, v in factors.items():
-                tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-12), epoch)
-            
+            for k in factors.keys():
+                f = factors[k] / (factors[k].max()+1e-8)
+                p = penalties[k]
+                canvas = torch.cat((f, torch.ones(f.size(0), f.size(1)//4).to(device=f.device), p), dim=1)
+                tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=epoch)
+                
+                img = Image.fromarray(canvas.mul(255.).cpu().numpy()).convert('L')
+                img.save(join(args.tmp, "imgs", k, "epoch%03d.png"%epoch))
+
+                tfboard_writer.add_scalar("details/%s"%k, group_levels[k], epoch)
+                tfboard_writer.add_scalar("details/%s"%k, group_levels[k], epoch)
+
     if args.local_rank == 0:
         logger.info("Training done, ALL results saved to %s." % args.tmp)
 
@@ -382,9 +422,10 @@ def main():
         if not args.fp16:
             model = BN_convert_float(model.half())
     if args.fp16 and (not args.finetune_fp16):
-            model.float()
+        model.float()
     
-    best_acc1 = 0    
+    if args.local_rank == 0:
+        best_acc1 = 0    
     for epoch in range(0, args.finetune_epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer_finetune, scheduler_finetune, epoch, finetune=True)
@@ -474,10 +515,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             synchronize_model(model)
 
         if i % args.print_freq == 0 and args.local_rank == 0:
-            if finetune:
-                tfboard_writer.add_scalar("finetune/iter-lr", lr, epoch*train_loader_len+i)
-            else:
-                tfboard_writer.add_scalar("train/iter-lr", lr, epoch*train_loader_len+i)
+            tfboard_writer.add_scalar("finetune/iter-lr" if finetune else "train/iter-lr", lr, epoch*train_loader_len+i)
             logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                         'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
                         'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \

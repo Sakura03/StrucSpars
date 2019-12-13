@@ -1,6 +1,6 @@
 import time, torch
 import torch.distributed as dist
-from resnet_cifar import GroupableConv2d, get_penalty_matrix
+from resnet_imagenet import GroupableConv2d, get_penalty_matrix
 
 @torch.no_grad()
 def get_level(matrix, thres):
@@ -19,11 +19,19 @@ def get_level(matrix, thres):
     return level, percents
 
 @torch.no_grad()
+def get_penalties(model):
+    penalties = {}
+    for name, m in model.named_modules():
+        if isinstance(m, GroupableConv2d):
+            penalties[name] = m.shuffled_penalty[m.P, :][:, m.Q].squeeze().float()
+    return penalties
+
+@torch.no_grad()
 def get_factors(model):
     factors = {}
     for name, m in model.named_modules():
         if isinstance(m, GroupableConv2d):
-            weight_norm = torch.norm(m.weight.data.view(m.out_channels, m.in_channels, -1), dim=-1, p=1)
+            weight_norm = torch.norm(m.weight.data.view(m.out_channels, m.in_channels, -1).float(), dim=-1, p=1)
             factors[name] = weight_norm[m.P, :][:, m.Q]
     return factors
 
@@ -40,13 +48,13 @@ def get_sparsity(factors, thres):
 def get_sparsity_from_model(model, thres):
     return get_sparsity(get_factors(model), thres)
 
-@torch.no_grad()
-def get_sparsity_loss(model):
-    loss = 0
-    for m in model.modules():
-        if isinstance(m, GroupableConv2d):
-            loss += m.compute_regularity()
-    return loss
+def get_sparsity_loss(model, enable_grad=False):
+    with torch.set_grad_enabled(enable_grad):
+        loss = 0
+        for m in model.modules():
+            if isinstance(m, GroupableConv2d):
+                loss += m.compute_regularity()
+        return loss
 
 @torch.no_grad()
 def impose_group_lasso(model, l1lambda):
@@ -66,11 +74,13 @@ def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.001):
         else:
             return get_threshold(model, target_sparsity, head=(head+tail)/2, tail=tail)
 
+@torch.no_grad()
 def set_group_levels(model, group_levels):
     for name, m in model.named_modules():
         if isinstance(m, GroupableConv2d):
             m.set_group_level(group_levels[name])
 
+@torch.no_grad()
 def update_permutation_matrix(model, iters=1):
     start = time.time()
     for name, m in model.named_modules():
@@ -110,15 +120,17 @@ def synchronize_model(model):
             m.Q_t = torch.from_numpy(m.Q).cuda()
             m.Pinv_t = torch.from_numpy(m.P_inv).cuda()
             m.Qinv_t = torch.from_numpy(m.Q_inv).cuda()
+            m.level_t = torch.tensor([m.group_level]).cuda()
             dist.broadcast(m.P_t, 0)
             dist.broadcast(m.Q_t, 0)
             dist.broadcast(m.Pinv_t, 0)
             dist.broadcast(m.Qinv_t, 0)
-            dist.broadcast(m.penalty, 0)
+            dist.broadcast(m.level_t, 0)
             dist.broadcast(m.shuffled_penalty, 0)
 
             m.P = m.P_t.cpu().numpy()
             m.Q = m.Q_t.cpu().numpy()
             m.P_inv = m.Pinv_t.cpu().numpy()
             m.Q_inv = m.Qinv_t.cpu().numpy()
-            del m.P_t, m.Q_t, m.Pinv_t, m.Qinv_t
+            m.group_level = m.level_t.cpu().item()
+            del m.P_t, m.Q_t, m.Pinv_t, m.Qinv_t, m.level_t

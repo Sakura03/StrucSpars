@@ -85,10 +85,13 @@ class GroupableConv2d(nn.Conv2d):
         self.group_level = 1
         self.power = power
         self.mask_grouped, self.real_grouped = False, False
-        self.P, self.P_inv = np.arange(self.out_channels), np.arange(self.out_channels)
-        self.Q, self.Q_inv = np.arange(self.in_channels), np.arange(self.in_channels)
+        self.register_buffer("P", torch.arange(self.out_channels))
+        self.register_buffer("P_inv", torch.arange(self.out_channels))
+        self.register_buffer("Q", torch.arange(self.in_channels))
+        self.register_buffer("Q_inv", torch.arange(self.in_channels))
         penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power)
-        self.register_buffer("shuffled_penalty", penalty[self.P_inv, :][:, self.Q_inv])
+        self.register_buffer('shuffled_penalty', penalty[self.P_inv, :][:, self.Q_inv])
+        # self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
         self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
         self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=self.power).numpy().astype(np.float64)
 
@@ -106,24 +109,26 @@ class GroupableConv2d(nn.Conv2d):
     
     def update_PQ(self, iters):
         ones_P, ones_Q = np.ones((self.out_channels, ), dtype=np.float64), np.ones((self.in_channels, ), dtype=np.float64)
+        P, Q = self.P.cpu().numpy(), self.Q.cpu().numpy()
         weight = self.weight.data.cpu().numpy().astype(np.float64).reshape(self.out_channels, self.in_channels, -1)
         weight_norm = np.linalg.norm(weight, ord=1, axis=-1)
 
         for _ in range(iters):
-            permutated_weight_norm = weight_norm[:, self.Q]
+            permutated_weight_norm = weight_norm[:, Q]
             M = np.matmul(self.template, permutated_weight_norm.T)
             P = ot.emd(ones_P, ones_P, M)
-            self.P = self.matrix2idx(P, row=True)
-            loss1 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
+            P = self.matrix2idx(P, row=True)
+            loss1 = np.sum(weight_norm[P, :][:, Q] * self.template)
             
-            permutated_weight_norm = weight_norm[self.P, :]
+            permutated_weight_norm = weight_norm[P, :]
             M = np.matmul(permutated_weight_norm.T, self.template)
             Q = ot.emd(ones_Q, ones_Q, M)
-            self.Q = self.matrix2idx(Q, row=False)
-            loss2 = np.sum(weight_norm[self.P, :][:, self.Q] * self.template)
+            Q = self.matrix2idx(Q, row=False)
+            loss2 = np.sum(weight_norm[P, :][:, Q] * self.template)
             if loss1 == loss2: break
         
-        self.P_inv, self.Q_inv = np.argsort(self.P), np.argsort(self.Q)
+        self.P, self.Q = torch.from_numpy(P).to(device=self.weight.data.device), torch.from_numpy(Q).to(device=self.weight.data.device)
+        self.P_inv, self.Q_inv = torch.argsort(self.P), torch.argsort(self.Q)
         penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
         self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
         self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
@@ -141,7 +146,9 @@ class GroupableConv2d(nn.Conv2d):
         self.permuted_mask = mask[self.P_inv, :][:, self.Q_inv]
         self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
         self.weight.data *= self.permuted_mask
-    
+        if hasattr(self, "template"): del self.template
+        if hasattr(self, "shuffled_penalty"): del self.shuffled_penalty
+
     def real_group(self):
         self.real_grouped = True
         self.groups = 2 ** (self.group_level-1)
@@ -150,9 +157,11 @@ class GroupableConv2d(nn.Conv2d):
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
-        del self.weight, self.template, self.shuffled_penalty
+        del self.weight
         self.weight = nn.Parameter(weight)
-    
+        if hasattr(self, "template"): del self.template
+        if hasattr(self, "shuffled_penalty"): del self.shuffled_penalty
+
     def forward(self, x):
         if self.real_grouped:
             x = x[:, self.Q, :, :]

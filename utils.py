@@ -39,9 +39,10 @@ def get_factors(model):
 def get_sparsity(factors, thres):
     total0 = 0
     total = 0
-    for v in factors.values():
-        total0 += v.numel() / (2 ** (get_level(v, thres)[0]-1))
-        total += v.numel()
+    for name, v in factors.items():
+        m = 9 if "conv2" in name else 1
+        total0 += v.numel() * m / (2 ** (get_level(v, thres)[0]-1))
+        total += v.numel() * m
     return 1. - float(total0) / total
 
 @torch.no_grad()
@@ -62,17 +63,16 @@ def impose_group_lasso(model, l1lambda):
         if isinstance(m, GroupableConv2d):
             m.impose_regularity(l1lambda)
             
-@torch.no_grad()
-def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.001):
+def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.01, max_iters=10):
     sparsity = get_sparsity_from_model(model, thres=(head+tail)/2)
-    if abs(sparsity - target_sparsity) <= margin:
+    if abs(sparsity - target_sparsity) <= margin or max_iters==0:
         # the ONLY output port
-        return (head+tail)/2
+        return (head+tail)/2 if sparsity >= target_sparsity else tail
     else:
         if sparsity >= target_sparsity:
-            return get_threshold(model, target_sparsity, head=head, tail=(head+tail)/2)
+            return get_threshold(model, target_sparsity, head=head, tail=(head+tail)/2, max_iters=max_iters-1)
         else:
-            return get_threshold(model, target_sparsity, head=(head+tail)/2, tail=tail)
+            return get_threshold(model, target_sparsity, head=(head+tail)/2, tail=tail, max_iters=max_iters-1)
 
 @torch.no_grad()
 def set_group_levels(model, group_levels):
@@ -116,21 +116,13 @@ def real_group(model):
 def synchronize_model(model):
     for m in model.modules():
         if isinstance(m, GroupableConv2d):
-            m.P_t = torch.from_numpy(m.P).cuda()
-            m.Q_t = torch.from_numpy(m.Q).cuda()
-            m.Pinv_t = torch.from_numpy(m.P_inv).cuda()
-            m.Qinv_t = torch.from_numpy(m.Q_inv).cuda()
             m.level_t = torch.tensor([m.group_level]).cuda()
-            dist.broadcast(m.P_t, 0)
-            dist.broadcast(m.Q_t, 0)
-            dist.broadcast(m.Pinv_t, 0)
-            dist.broadcast(m.Qinv_t, 0)
+            dist.broadcast(m.P, 0)
+            dist.broadcast(m.Q, 0)
+            dist.broadcast(m.P_inv, 0)
+            dist.broadcast(m.Q_inv, 0)
             dist.broadcast(m.level_t, 0)
             dist.broadcast(m.shuffled_penalty, 0)
 
-            m.P = m.P_t.cpu().numpy()
-            m.Q = m.Q_t.cpu().numpy()
-            m.P_inv = m.Pinv_t.cpu().numpy()
-            m.Q_inv = m.Qinv_t.cpu().numpy()
             m.group_level = m.level_t.cpu().item()
-            del m.P_t, m.Q_t, m.Pinv_t, m.Qinv_t, m.level_t
+            del m.level_t

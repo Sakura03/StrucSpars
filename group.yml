@@ -1,0 +1,5 @@
+name: group
+channels:
+  - defaults
+prefix: /home/taihong_xiao/.local/anaconda3/envs/group
+

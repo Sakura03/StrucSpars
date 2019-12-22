@@ -315,7 +315,7 @@ def main():
                         'epoch': epoch + 1,
                         'arch': args.arch,
                         'state_dict': model.state_dict(),
-                        'best_prec1': best_acc1,
+                        'best_acc1': best_acc1,
                         'optimizer': optimizer.state_dict(),
                         }, is_best=False, path=args.tmp, filename="checkpoint-epoch%d.pth"%epoch)
             logger.info("Best acc1=%.5f" % best_acc1)
@@ -548,7 +548,7 @@ def validate(val_loader, model, epoch, finetune=False):
     # switch to evaluate mode
     model.eval()
     if args.local_rank == 0:
-        val_loader_len = int(np.ceil(val_loader._size/args.batch_size))
+        val_loader_len = int(np.ceil(val_loader._size/50))
         
         end = time.time()
     for i, data in enumerate(val_loader):

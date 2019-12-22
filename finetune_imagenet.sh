@@ -1,0 +1,22 @@
+python -m torch.distributed.launch --nproc_per_node=4 train_groupnet_imagenet.py \
+                                   -a "resnext50_32x4d" \
+                                   --data "/media/ssd1/ilsvrc12/rec" \
+                                   --tmp "results/imagenet-resnext50-delta-lambda1e-5-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.67-adjust-lambda-again" \
+                                   --resume "results/imagenet-resnext50-delta-lambda1e-5-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.67-adjust-lambda/checkpoint-epoch59.pth" \
+                                   --batch-size "64" \
+                                   --use-rec \
+                                   --dali-cpu \
+                                   --epochs "0" \
+                                   --milestones "[60]" \
+                                   --wd "0." \
+                                   --sparsity "2e-6" \
+                                   --delta-lambda "2e-6" \
+                                   --adjust-lambda \
+                                   --sparse-thres "0.1" \
+                                   --power "0.5" \
+                                   --warmup "5" \
+                                   --percent "0.67" \
+                                   --group1x1 \
+                                   --init-iters "0" \
+                                   --epoch-iters "0" \
+                                   --iter-iters "0"

@@ -228,7 +228,7 @@ def main():
             checkpoint = torch.load(args.resume, map_location=torch.device('cpu'))
             args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
             optimizer.load_state_dict(checkpoint['optimizer'])
             if args.local_rank == 0:
                 logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
@@ -384,7 +384,7 @@ def main():
     # thres = args.sparse_thres
     with torch.no_grad():
         thres = get_threshold(model.module, args.percent)
-    # calculatei final sparsity, FLOPs, and params
+    # calculate final sparsity, FLOPs, and params
     factors = get_factors(model.module)
     if args.local_rank == 0:
         m = eval(model_name).cuda()
@@ -399,13 +399,14 @@ def main():
         logger.info("Threshold %.3e, final sparsity %.6f, target sparsity %.6f, %.3e FLOPs, %.3e params" % (thres, model_sparsity, args.percent, flops, params))
 
     group_levels = mask_group(model.module, factors, thres, logger=logger if args.local_rank == 0 else None)
+    torch.save(group_levels, join(args.tmp, "group_levels.pth"))
 
     if args.local_rank == 0:
         logger.info("evaluating after grouping...")
     acc1, acc5 = validate(val_loader, model, args.epochs)
 
     # real grouping
-    # real_group(model.module, group_levels)
+    # real_group(model.module)
     # if args.local_rank == 0:
     #     flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(),), custom_ops=custom_ops, verbose=False)
     #     logger.info("FLOPs %.3e, Params %.3e (after real grouping)" % (flops, params))

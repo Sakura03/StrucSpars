@@ -263,7 +263,7 @@ def main():
         for m in model.module.named_modules():
             if isinstance(m, GroupableConv2d):
                 m.mask_group()
-                m.real_group()
+                # m.real_group()
     
     for epoch in range(args.start_epoch, args.finetune_epochs):
         # train and evaluate

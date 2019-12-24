@@ -31,17 +31,13 @@ parser.add_argument('-j', '--workers', default=4, type=int, help='number of data
 parser.add_argument('--batch-size', default=64, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--imsize', default=256, type=int, metavar='N', help='image resize size')
 parser.add_argument('--imcrop', default=224, type=int, metavar='N', help='image crop size')
-parser.add_argument('--epochs', default=110, type=int, metavar='N', help='number of total epochs to run')
 parser.add_argument('--warmup', default=5, type=int, help="warmup epochs (small lr and do not impose sparsity)")
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float, metavar='LR', help='initial learning rate')
 parser.add_argument('--gamma', default=0.1, type=float, metavar='GM', help='decrease learning rate by gamma')
-parser.add_argument('--milestones', default=[30, 60, 90], type=eval, help='milestones for scheduling lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
-parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float, metavar='WD', help='weight decay')
 parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to the latest checkpoint')
+parser.add_argument('--level-file', default=None, type=str, metavar='PATH', help='path to the saved group levels')
 parser.add_argument('--tmp', default="results/tmp", type=str, help='tmp folder')
 # FP16
-parser.add_argument('--fp16', action='store_true', help='Train the model with precision float16')
 parser.add_argument('--finetune-fp16', action='store_true', help="Train the model with precision float16")
 parser.add_argument('--static-loss-scale', type=float, default=1, help='Static loss scale, positive power of 2 values can improve fp16 convergence.')
 parser.add_argument('--dynamic-loss-scale', action='store_true', help='Use dynamic loss scaling.  If supplied, this argument supersedes --static-loss-scale.')
@@ -50,19 +46,12 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--dali-cpu', action='store_true', help='Runs CPU based version of DALI pipeline.')
 parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
 
-parser.add_argument('--fix-lr', action="store_true", help='set true to fix learning rate')
-parser.add_argument('--no-finetune', action="store_true", help='set true to disable finetuning')
 parser.add_argument('--group1x1', action="store_true", help='set true to group conv1x1')
-parser.add_argument('--sparsity', type=float, default=1e-5, help='sparsity regularization')
 parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
 parser.add_argument('--finetune-lr', type=int, default=1e-1, help="finetune lr")
 parser.add_argument('--finetune-epochs', type=int, default=120, help="finetune epochs")
-parser.add_argument('--finetune-milestones', type=eval, default=[30, 60, 90], help="finetune milestones")
 parser.add_argument('--finetune-weight-decay', type=float, default=1e-4, help="finetune weight decay")
-parser.add_argument('--init-iters', type=int, default=50, help='Initial iterations')
-parser.add_argument('--epoch-iters', type=int, default=20, help='Iterations for each epoch')
-parser.add_argument('--iter-iters', type=int, default=5, help='Iterations for each 500 training iterations')
-parser.add_argument('--power', type=float, default=0.3, help='Decay rate in the penalty matrix')
+parser.add_argument('--restart-finetune', action="store_true", help='set true to restart finetune')
 parser.add_argument('--percent', type=float, default=0.5, help='remaining parameter percent')
 args = parser.parse_args()
 
@@ -148,7 +137,7 @@ args.distributed = False
 if 'WORLD_SIZE' in os.environ:
     args.distributed = int(os.environ['WORLD_SIZE']) > 1
 
-if args.fp16 or args.finetune_fp16:
+if args.finetune_fp16:
     assert torch.backends.cudnn.enabled, "fp16 mode requires cudnn backend to be enabled."
 
 def main():
@@ -183,12 +172,11 @@ def main():
     
     # model and optimizer
     group1x1 = "True" if args.group1x1 else "False"
-    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
+    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")
         logger.info(model)
-
     if args.finetune_fp16:
         model = BN_convert_float(model.half())
     model = DDP(model, delay_allreduce=False)
@@ -201,61 +189,86 @@ def main():
         optimizer_finetune = FP16_Optimizer(optimizer_finetune, static_loss_scale=args.static_loss_scale,
                                             dynamic_loss_scale=args.dynamic_loss_scale, verbose=False)
     
-    scheduler_finetune = CosAnnealingLR(loader_len=train_loader_len, epochs=args.finetune_epochs,
-                                        lr_max=args.finetune_lr, warmup_epochs=args.warmup)
+    # resume from a checkpoint
+    assert isfile(args.resume), "=> no checkpoint found at '{}'".format(args.resume)
+    if args.local_rank == 0:
+        logger.info("=> loading checkpoint '{}'".format(args.resume))
+    checkpoint = torch.load(args.resume, map_location=torch.device('cpu'))
+    model.load_state_dict(checkpoint['state_dict'], strict=False)
+    if args.restart_finetune:
+        optimizer_finetune.load_state_dict(checkpoint['optimizer'])
+        args.start_epoch = checkpoint['epoch']
+        if args.local_rank == 0: best_acc1 = checkpoint['best_acc1']
+        assert isfile(args.level_file), "=> no group level file at '{}'".format(args.level_file)
+        group_levels = torch.load(args.level_file)
+    else:
+        args.start_epoch = 0
+        if args.local_rank == 0: best_acc1 = 0    
     
-    # optionally resume from a checkpoint
-    if args.resume:
-        if isfile(args.resume):
-            if args.local_rank == 0:
-                logger.info("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location=torch.device('cpu'))
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
-            if args.local_rank == 0:
-                logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
-        else:
-            if args.local_rank == 0:
-                logger.info("=> no checkpoint found at '{}'".format(args.resume))
-
     if args.local_rank == 0:
-        # evaluate before grouping
-        logger.info("evaluating before grouping...")
-    acc1, acc5 = validate(val_loader, model, args.epochs)
-    if args.local_rank == 0:
-        tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-2)
-        tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-2)
+        logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
 
-    # mask grouping
-    # thres = get_threshold(model.module, args.percent)
-    thres = args.sparse_thres
-    # if args.local_rank == 0:
-    #     logger.info("Prune rate %.3e, threshold %.3e" % (args.percent, thres))
-    # group_levels = mask_group(model.module, get_factors(model.module), thres, logger=logger if args.local_rank == 0 else None)
-    fake_mask_group(model.module, logger=logger if args.local_rank==0 else None)
+    scheduler_finetune = CosAnnealingLR(loader_len=train_loader_len, epochs=args.finetune_epochs,
+                                        lr_max=args.finetune_lr, warmup_epochs=args.warmup,
+                                        last_epoch=args.start_epoch-1)
+    
+    if not args.restart_finetune:
+        if args.local_rank == 0:
+            # evaluate before grouping
+            logger.info("evaluating before grouping...")
+        acc1, acc5 = validate(val_loader, model, args.epochs)
+        if args.local_rank == 0:
+            tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-2)
+            tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-2)
 
-    if args.local_rank == 0:
-        logger.info("evaluating after grouping...")
-    acc1, acc5 = validate(val_loader, model, args.epochs)
+        # mask grouping
+        # thres = args.sparse_thres
+        with torch.no_grad():
+            thres = get_threshold(model.module, args.percent)
+        # calculate final sparsity, FLOPs, and params
+        factors = get_factors(model.module)
+        if args.local_rank == 0:
+            m = eval(model_name).cuda()
+            group_levels = mask_group(m, factors, thres, logger=None)
+            real_group(m)
+            set_group_levels(model.module, group_levels)
+    
+            model_sparsity = get_sparsity(factors, thres=thres)
+            flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
+            del m
+            torch.cuda.empty_cache()
+            logger.info("Threshold %.3e, final sparsity %.6f, target sparsity %.6f, %.3e FLOPs, %.3e params" % (thres, model_sparsity, args.percent, flops, params))
 
-    # real grouping
-    # real_group(model.module, group_levels)
-    # if args.local_rank == 0:
-    #     flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(),), custom_ops=custom_ops, verbose=False)
-    #     logger.info("FLOPs %.3e, Params %.3e (after real grouping)" % (flops, params))
+        group_levels = mask_group(model.module, factors, thres, logger=logger if args.local_rank == 0 else None)
+        torch.save(group_levels, join(args.tmp, "group_levels.pth"))
 
-    #     logger.info("evaluating after real grouping...")
-    # acc1, acc5 = validate(val_loader, model, args.epochs)
+        if args.local_rank == 0:
+            logger.info("evaluating after grouping...")
+        acc1, acc5 = validate(val_loader, model, args.epochs)
 
-    if args.local_rank == 0:
-        tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-1)
-        tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-1)
+        # real grouping
+        # real_group(model.module)
+        # if args.local_rank == 0:
+        #     flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(),), custom_ops=custom_ops, verbose=False)
+        #     logger.info("FLOPs %.3e, Params %.3e (after real grouping)" % (flops, params))
 
-    if args.local_rank == 0:
-        best_acc1 = 0    
-    for epoch in range(0, args.finetune_epochs):
+        #     logger.info("evaluating after real grouping...")
+        # acc1, acc5 = validate(val_loader, model, args.epochs)
+
+        if args.local_rank == 0:
+            tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-1)
+            tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-1)
+    else:
+        set_group_levels(model.module, group_levels)
+        for m in model.module.named_modules():
+            if isinstance(m, GroupableConv2d):
+                m.mask_group()
+                m.real_group()
+    
+    for epoch in range(args.start_epoch, args.finetune_epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer_finetune, scheduler_finetune, epoch)
-        acc1, acc5 = validate(val_loader, model, epoch, finetune=True)
+        acc1, acc5 = validate(val_loader, model, epoch)
         
         if args.local_rank == 0:
             # remember best prec@1 and save checkpoint
@@ -291,6 +304,13 @@ def train(train_loader, model, optimizer, scheduler, epoch):
     if args.local_rank == 0:
         end = time.time()
     for i, data in enumerate(train_loader):
+        
+        # compute and adjust lr
+        if scheduler is not None:
+            lr = scheduler.step()
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+        
         target = data[0]["label"].squeeze().cuda().long()
         data = data[0]["data"]
         if args.finetune_fp16:
@@ -313,12 +333,6 @@ def train(train_loader, model, optimizer, scheduler, epoch):
             top1.update(acc1.item(), data.size(0))
             top5.update(acc5.item(), data.size(0))
 
-        # compute and adjust lr
-        if scheduler is not None:
-            lr = scheduler.step()
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-        
         # compute gradient and do SGD step
         optimizer.zero_grad()
         if args.finetune_fp16:
@@ -350,7 +364,7 @@ def train(train_loader, model, optimizer, scheduler, epoch):
     return loss.cpu().item()
 
 @torch.no_grad()
-def validate(val_loader, model, epoch, finetune=False):
+def validate(val_loader, model, epoch):
     losses = AverageMeter()
     if args.local_rank == 0:
         batch_time = AverageMeter()
@@ -365,7 +379,7 @@ def validate(val_loader, model, epoch, finetune=False):
     for i, data in enumerate(val_loader):
         target = data[0]["label"].squeeze().cuda().long()
         data = data[0]["data"]
-        if (finetune and args.finetune_fp16) or ((not finetune) and args.fp16):
+        if args.finetune_fp16:
             data = data.half()
         # compute output
         output = model(data)
@@ -409,18 +423,6 @@ def reduce_tensor(tensor):
     dist.reduce(rt, 0, op=dist.ReduceOp.SUM)
     rt /= args.world_size
     return rt
-
-def fake_mask_group(model, logger):
-    for name, m in model.named_modules():
-        if isinstance(m, GroupableConv2d):
-            unique_penalties = m.shuffled_penalty.unique()
-            m.group_level = len(unique_penalties) - 1
-            m.mask_grouped = True
-            m.permuted_mask = (m.shuffled_penalty <= m.shuffled_penalty.unique(sorted=True)[1]).to(m.weight.dtype)
-            assert torch.sum(m.permuted_mask) == m.in_channels * m.out_channels / (2 ** (m.group_level - 1))
-            m.weight.data *= m.permuted_mask
-            if logger is not None:
-                logger.info("Layer %s, weight size %s, group level %d" % (name, str(list(m.weight.size())), m.group_level))
 
 if __name__ == '__main__':
     main()

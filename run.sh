@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=1 python3 train_groupnet_cifar.py --tmp "results/cifar100-res50-delta1e-5-thres0.05-percent0.5-power0.5" --sparsity 0. --delta-lambda 1e-5 --sparse-thres 0.05 --percent 0.5 --power 0.5

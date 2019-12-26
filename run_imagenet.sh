@@ -1,8 +1,8 @@
 python -m torch.distributed.launch --nproc_per_node=4 train_groupnet_imagenet.py \
-                                   -a "resnet50" \
+                                   -a "resnet101" \
                                    --data "/media/ssd1/ilsvrc12/rec" \
-                                   --tmp "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.75-adjust-lambda" \
-                                   --batch-size "128" \
+                                   --tmp "results/imagenet-resnet101-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.80-adjust-lambda" \
+                                   --batch-size "64" \
                                    --use-rec \
                                    --dali-cpu \
                                    --epochs "60" \
@@ -14,7 +14,7 @@ python -m torch.distributed.launch --nproc_per_node=4 train_groupnet_imagenet.py
                                    --sparse-thres "0.1" \
                                    --power "0.5" \
                                    --warmup "5" \
-                                   --percent "0.75" \
+                                   --percent "0.80" \
                                    --group1x1 \
                                    --init-iters "20" \
                                    --epoch-iters "5" \

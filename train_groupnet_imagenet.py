@@ -275,7 +275,7 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer, scheduler, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
-        acc1, acc5 = validate(val_loader, model, epoch)
+        acc1, acc5 = validate(val_loader, model)
         
         if args.local_rank == 0:
             # update permutation matrices P and Q
@@ -375,7 +375,7 @@ def main():
 
         # evaluate before grouping
         logger.info("evaluating before grouping...")
-    acc1, acc5 = validate(val_loader, model, args.epochs)
+    acc1, acc5 = validate(val_loader, model)
     if args.local_rank == 0:
         tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-2)
         tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-2)
@@ -403,7 +403,7 @@ def main():
 
     if args.local_rank == 0:
         logger.info("evaluating after grouping...")
-    acc1, acc5 = validate(val_loader, model, args.epochs)
+    acc1, acc5 = validate(val_loader, model)
 
     # real grouping
     # real_group(model.module)
@@ -412,7 +412,7 @@ def main():
     #     logger.info("FLOPs %.3e, Params %.3e (after real grouping)" % (flops, params))
 
     #     logger.info("evaluating after real grouping...")
-    # acc1, acc5 = validate(val_loader, model, args.epochs)
+    # acc1, acc5 = validate(val_loader, model)
 
     if args.local_rank == 0:
         tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-1)
@@ -439,7 +439,7 @@ def main():
     for epoch in range(0, args.finetune_epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer_finetune, scheduler_finetune, epoch, finetune=True)
-        acc1, acc5 = validate(val_loader, model, epoch, finetune=True)
+        acc1, acc5 = validate(val_loader, model, finetune=True)
         
         if args.local_rank == 0:
             # remember best prec@1 and save checkpoint
@@ -540,7 +540,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
     return loss.cpu().item()
 
 @torch.no_grad()
-def validate(val_loader, model, epoch, finetune=False):
+def validate(val_loader, model, finetune=False):
     losses = AverageMeter()
     if args.local_rank == 0:
         batch_time = AverageMeter()

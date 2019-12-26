@@ -163,7 +163,7 @@ def main():
     pipe.build()
     train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
 
-    pipe = HybridValPipe(batch_size=args.batch_size, num_threads=args.workers,
+    pipe = HybridValPipe(batch_size=50, num_threads=args.workers,
                          device_id=args.local_rank, data_dir=valdir,
                          crop=args.imcrop, size=args.imsize)
     pipe.build()
@@ -216,7 +216,7 @@ def main():
         if args.local_rank == 0:
             # evaluate before grouping
             logger.info("evaluating before grouping...")
-        acc1, acc5 = validate(val_loader, model, args.epochs)
+        acc1, acc5 = validate(val_loader, model)
         if args.local_rank == 0:
             tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-2)
             tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-2)
@@ -244,7 +244,7 @@ def main():
 
         if args.local_rank == 0:
             logger.info("evaluating after grouping...")
-        acc1, acc5 = validate(val_loader, model, args.epochs)
+        acc1, acc5 = validate(val_loader, model)
 
         # real grouping
         # real_group(model.module)
@@ -253,7 +253,7 @@ def main():
         #     logger.info("FLOPs %.3e, Params %.3e (after real grouping)" % (flops, params))
 
         #     logger.info("evaluating after real grouping...")
-        # acc1, acc5 = validate(val_loader, model, args.epochs)
+        # acc1, acc5 = validate(val_loader, model)
 
         if args.local_rank == 0:
             tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-1)
@@ -268,7 +268,7 @@ def main():
     for epoch in range(args.start_epoch, args.finetune_epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer_finetune, scheduler_finetune, epoch)
-        acc1, acc5 = validate(val_loader, model, epoch)
+        acc1, acc5 = validate(val_loader, model)
         
         if args.local_rank == 0:
             # remember best prec@1 and save checkpoint
@@ -364,7 +364,7 @@ def train(train_loader, model, optimizer, scheduler, epoch):
     return loss.cpu().item()
 
 @torch.no_grad()
-def validate(val_loader, model, epoch):
+def validate(val_loader, model):
     losses = AverageMeter()
     if args.local_rank == 0:
         batch_time = AverageMeter()
@@ -373,7 +373,7 @@ def validate(val_loader, model, epoch):
     # switch to evaluate mode
     model.eval()
     if args.local_rank == 0:
-        val_loader_len = int(np.ceil(val_loader._size/args.batch_size))
+        val_loader_len = int(np.ceil(val_loader._size/50))
         
         end = time.time()
     for i, data in enumerate(val_loader):

@@ -65,7 +65,7 @@ def impose_group_lasso(model, l1lambda):
             
 def get_threshold(model, target_sparsity, head=0., tail=1., margin=0.01, max_iters=10):
     sparsity = get_sparsity_from_model(model, thres=(head+tail)/2)
-    if abs(sparsity - target_sparsity) <= margin or max_iters==0:
+    if (sparsity >= target_sparsity and sparsity-target_sparsity <= margin) or max_iters==0:
         # the ONLY output port
         return (head+tail)/2 if sparsity >= target_sparsity else tail
     else:

@@ -41,9 +41,9 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--dali-cpu', action='store_true', help='Runs CPU based version of DALI pipeline.')
 parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
 
-parser.add_argument('--lr', '--learning-rate', type=int, default=1e-1, help="finetune lr")
-parser.add_argument('--epochs', type=int, default=120, help="finetune epochs")
-parser.add_argument('--wd', '--weight-decay', type=float, default=1e-4, help="finetune weight decay")
+parser.add_argument('--lr', '--learning-rate', type=int, default=1e-1, help="learning rate")
+parser.add_argument('--epochs', type=int, default=120, help="epochs")
+parser.add_argument('--wd', '--weight-decay', type=float, default=1e-4, help="weight decay")
 args = parser.parse_args()
 
 # DALI pipelines
@@ -127,7 +127,7 @@ args.distributed = False
 if 'WORLD_SIZE' in os.environ:
     args.distributed = int(os.environ['WORLD_SIZE']) > 1
 
-if args.finetune_fp16:
+if args.fp16:
     assert torch.backends.cudnn.enabled, "fp16 mode requires cudnn backend to be enabled."
 
 def main():
@@ -166,7 +166,7 @@ def main():
     if args.local_rank == 0:
         logger.info("Model details:")
         logger.info(model)
-    if args.finetune_fp16:
+    if args.fp16:
         model = BN_convert_float(model.half())
     model = DDP(model, delay_allreduce=False)
 
@@ -174,7 +174,7 @@ def main():
     if args.local_rank == 0:
         logger.info("Optimizer details:")
         logger.info(optimizer)
-    if args.finetune_fp16:
+    if args.fp16:
         optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.static_loss_scale,
                                    dynamic_loss_scale=args.dynamic_loss_scale, verbose=False)
 
@@ -202,7 +202,7 @@ def main():
     if args.local_rank == 0:
         logger.info("Baseline model: %.3e FLOPs, %.3e params" % (flops, params))
 
-    for epoch in range(args.start_epoch, args.finetune_epochs):
+    for epoch in range(args.start_epoch, args.epochs):
         # train and evaluate
         loss = train(train_loader, model, optimizer, scheduler, epoch)
         acc1, acc5 = validate(val_loader, model)
@@ -248,7 +248,7 @@ def train(train_loader, model, optimizer, scheduler, epoch):
         
         target = data[0]["label"].squeeze().cuda().long()
         data = data[0]["data"]
-        if args.finetune_fp16:
+        if args.fp16:
             data = data.half()
 
         # measure data loading time
@@ -270,7 +270,7 @@ def train(train_loader, model, optimizer, scheduler, epoch):
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        if args.finetune_fp16:
+        if args.fp16:
             optimizer.backward(loss)
         else:
             loss.backward()
@@ -287,7 +287,7 @@ def train(train_loader, model, optimizer, scheduler, epoch):
             logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                         'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
                         'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E}' \
-                        .format(epoch, args.finetune_epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
+                        .format(epoch, args.epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
                                 loss=losses, top1=top1, top5=top5, lr=lr))
         
         if args.local_rank == 0:
@@ -314,7 +314,7 @@ def validate(val_loader, model):
     for i, data in enumerate(val_loader):
         target = data[0]["label"].squeeze().cuda().long()
         data = data[0]["data"]
-        if args.finetune_fp16:
+        if args.fp16:
             data = data.half()
         # compute output
         output = model(data)

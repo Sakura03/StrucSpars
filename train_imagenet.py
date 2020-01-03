@@ -2,7 +2,7 @@ import torch, os, argparse, time, warnings
 import numpy as np
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
-import resnet_imagenet
+import resnet
 from tensorboardX import SummaryWriter
 from thop import profile
 # DALI data reader
@@ -161,7 +161,7 @@ def main():
     train_loader_len = int(train_loader._size / args.batch_size)
     
     # model and optimizer
-    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
+    model_name = "resnet.%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")

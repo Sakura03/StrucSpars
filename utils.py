@@ -1,6 +1,6 @@
 import time, torch
 import torch.distributed as dist
-from resnet_imagenet import GroupableConv2d, get_penalty_matrix
+from resnet import GroupableConv2d, get_penalty_matrix
 
 @torch.no_grad()
 def get_level(matrix, thres):

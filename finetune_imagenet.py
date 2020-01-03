@@ -1,12 +1,11 @@
 import torch, os, argparse, time, warnings
 import numpy as np
-from PIL import Image
 from os.path import join, isfile
-from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, MultiStepLR, CosAnnealingLR
-from resnet_imagenet import GroupableConv2d
+from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
+from resnet import GroupableConv2d
 from utils import get_factors, get_sparsity, get_threshold
 from utils import set_group_levels, mask_group, real_group
-import resnet_imagenet
+import resnet
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 # DALI data reader
@@ -172,7 +171,7 @@ def main():
     
     # model and optimizer
     group1x1 = "True" if args.group1x1 else "False"
-    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
+    model_name = "resnet.%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")

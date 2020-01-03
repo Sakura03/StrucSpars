@@ -3,10 +3,10 @@ import numpy as np
 from PIL import Image
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, MultiStepLR, CosAnnealingLR
-from resnet_imagenet import GroupableConv2d
+from resnet import GroupableConv2d
 from utils import get_penalties, get_factors, get_sparsity, get_sparsity_loss, get_threshold, synchronize_model
 from utils import set_group_levels, update_permutation_matrix, mask_group, real_group, impose_group_lasso
-import resnet_imagenet
+import resnet
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 # DALI data reader
@@ -63,7 +63,7 @@ parser.add_argument('--finetune-weight-decay', type=float, default=1e-4, help="f
 parser.add_argument('--init-iters', type=int, default=50, help='Initial iterations')
 parser.add_argument('--epoch-iters', type=int, default=20, help='Iterations for each epoch')
 parser.add_argument('--iter-iters', type=int, default=5, help='Iterations for each 500 training iterations')
-parser.add_argument('--power', type=float, default=0.3, help='Decay rate in the penalty matrix')
+parser.add_argument('--power', type=float, default=0.5, help='Decay rate in the penalty matrix')
 parser.add_argument('--percent', type=float, default=0.5, help='remaining parameter percent')
 args = parser.parse_args()
 
@@ -184,7 +184,7 @@ def main():
     
     # model and optimizer
     group1x1 = "True" if args.group1x1 else "False"
-    model_name = "resnet_imagenet.%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
+    model_name = "resnet.%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")
@@ -350,9 +350,8 @@ def main():
         if args.local_rank == 0:
             tfboard_writer.add_scalar("train/FLOPs", flops, epoch)
             tfboard_writer.add_scalar("train/Params", params, epoch)
-            # tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
+            tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
             tfboard_writer.add_scalar('train/sloss-epoch', sloss, epoch)
-            tfboard_writer.add_scalar('train/lr-epoch', optimizer.param_groups[0]["lr"], epoch)
             tfboard_writer.add_scalar('train/model-sparsity', model_sparsity, epoch)
             tfboard_writer.add_scalar('train/sparse-penalty', args.sparsity, epoch)
             tfboard_writer.add_scalar('test/acc1-epoch', acc1, epoch)

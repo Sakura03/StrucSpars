@@ -3,10 +3,10 @@ import numpy as np
 from PIL import Image
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, MultiStepLR, CosAnnealingLR
-from resnet import GroupableConv2d
+from model import GroupableConv2d
 from utils import get_penalties, get_factors, get_sparsity, get_sparsity_loss, get_threshold, synchronize_model
 from utils import set_group_levels, update_permutation_matrix, mask_group, real_group, impose_group_lasso
-import resnet
+import model
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 # DALI data reader
@@ -184,7 +184,7 @@ def main():
     
     # model and optimizer
     group1x1 = "True" if args.group1x1 else "False"
-    model_name = "resnet.%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
+    model_name = "model.%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")

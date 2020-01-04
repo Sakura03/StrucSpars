@@ -1,8 +1,8 @@
-python -m torch.distributed.launch --nproc_per_node=4 train_imagenet.py \
-                                   -a "resnet50" \
-                                   --data "/media/ssd1/ilsvrc12/rec" \
-                                   --tmp "results/imagenet-resnet50-baseline" \
-                                   --batch-size "64" \
+python -m torch.distributed.launch --nproc_per_node=2 train_imagenet.py \
+                                   -a "densenet201" \
+                                   --data "/media/ssd0/ilsvrc12/rec" \
+                                   --tmp "results/imagenet-densenet-baseline" \
+                                   --batch-size "32" \
                                    --use-rec \
                                    --dali-cpu \
                                    --warmup "5"

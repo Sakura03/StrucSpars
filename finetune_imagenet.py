@@ -3,7 +3,7 @@ import numpy as np
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
 from model import *
-from utils import get_factors, get_sparsity, get_threshold
+from utils import get_factors, get_sparsity, get_threshold, init_params, repermute_matrices
 from utils import set_group_levels, mask_group, real_group
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks

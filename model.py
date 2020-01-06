@@ -372,7 +372,7 @@ class ResNet(nn.Module):
         return x
 
 
-def _resnet(arch, block, layers, pretrained, progress, **kwargs):
+def _resnet(arch, block, layers, **kwargs):
     model = ResNet(block, layers, **kwargs)
     return model
 

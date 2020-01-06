@@ -5,10 +5,12 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import torch.utils.checkpoint as cp
 from collections import OrderedDict
-__all__ = ['ResNet', 'ResNet_cifar', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
+__all__ = ['GroupableConv2d', 'resnet18', 'resnet34', 'resnet50', 'resnet101', 
            'resnet152', 'resnext50_32x4d', 'resnext101_32x8d', 'wide_resnet50_2',
            'wide_resnet101_2', 'resnet20_cifar', 'resnet32_cifar', 'resnet44_cifar',
-           'resnet56_cifar', 'resnet110_cifar', 'resnet1202_cifar']
+           'resnet56_cifar', 'resnet110_cifar', 'resnet1202_cifar', 'vgg11', 'vgg13',
+           'vgg16', 'vgg19', 'vgg11_bn', 'vgg13_bn', 'vgg16_bn', 'vgg19_bn',
+           'densenet121', 'densenet161', 'densenet169', 'densenet201']
 
 #####################################################################################
 #####################################################################################
@@ -28,7 +30,7 @@ def isPower(n):
 
 @torch.no_grad()
 def get_penalty_matrix(dim1, dim2, level=None, power=0.5):
-    assert isPower(dim1) and isPower(dim2)
+    # assert isPower(dim1) and isPower(dim2)
     if level is None: level = 100
     weight = torch.zeros(dim1, dim2)
     assign_location(weight, 1., level, power)
@@ -37,7 +39,8 @@ def get_penalty_matrix(dim1, dim2, level=None, power=0.5):
 @torch.no_grad()
 def assign_location(tensor, num, level, power):
     dim1, dim2 = tensor.size()
-    if dim1 == 1 or dim2 == 1 or level == 0:
+    # if dim1 == 1 or dim2 == 1 or level == 0:
+    if dim1 % 2 != 0 or dim2 % 2 != 0 or level == 0:
         return
     else:
         tensor[dim1//2:, :dim2//2] = num
@@ -565,7 +568,6 @@ def resnet1202_cifar(**kwargs):
 #####################################################################################
 
 class VGG(nn.Module):
-
     def __init__(self, features, num_classes=1000, init_weights=True):
         super(VGG, self).__init__()
         self.features = features
@@ -603,14 +605,14 @@ class VGG(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
 
-def make_layers(cfg, batch_norm=False, groupable=True):
+def make_layers(cfg, batch_norm=False, groupable=True, power=0.5):
     layers = []
     in_channels = 3
     for v in cfg:
         if v == 'M':
             layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
         else:
-            conv2d = GroupableConv2d(in_channels, v, 3, 1, 1) if groupable else nn.Conv2d(in_channels, v, 3, 1, 1)
+            conv2d = GroupableConv2d(in_channels, v, 3, 1, 1, power=power) if groupable else nn.Conv2d(in_channels, v, 3, 1, 1)
             if batch_norm:
                 layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
             else:
@@ -627,65 +629,65 @@ cfgs = {
 }
 
 
-def _vgg(arch, cfg, batch_norm, groupable, **kwargs):
-    model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm, groupable=groupable), **kwargs)
+def _vgg(arch, cfg, batch_norm, groupable=True, power=0.5, **kwargs):
+    model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm, groupable=groupable, power=power), **kwargs)
     return model
 
 
-def vgg11(**kwargs):
+def vgg11(groupable=True, power=0.5, **kwargs):
     r"""VGG 11-layer model (configuration "A") from
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg11', 'A', False, **kwargs)
+    return _vgg('vgg11', 'A', False, groupable, power, **kwargs)
 
 
-def vgg11_bn(**kwargs):
+def vgg11_bn(groupable=True, power=0.5, **kwargs):
     r"""VGG 11-layer model (configuration "A") with batch normalization
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg11_bn', 'A', True, **kwargs)
+    return _vgg('vgg11_bn', 'A', True, groupable, power, **kwargs)
 
 
-def vgg13(**kwargs):
+def vgg13(groupable=True, power=0.5, **kwargs):
     r"""VGG 13-layer model (configuration "B")
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg13', 'B', False, **kwargs)
+    return _vgg('vgg13', 'B', False, groupable, power, **kwargs)
 
 
-def vgg13_bn(**kwargs):
+def vgg13_bn(groupable=True, power=0.5, **kwargs):
     r"""VGG 13-layer model (configuration "B") with batch normalization
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg13_bn', 'B', True, **kwargs)
+    return _vgg('vgg13_bn', 'B', True, groupable, power, **kwargs)
 
 
-def vgg16(**kwargs):
+def vgg16(groupable=True, power=0.5, **kwargs):
     r"""VGG 16-layer model (configuration "D")
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg16', 'D', False, **kwargs)
+    return _vgg('vgg16', 'D', False, groupable, power, **kwargs)
 
 
-def vgg16_bn(**kwargs):
+def vgg16_bn(groupable=True, power=0.5, **kwargs):
     r"""VGG 16-layer model (configuration "D") with batch normalization
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg16_bn', 'D', True, **kwargs)
+    return _vgg('vgg16_bn', 'D', True, groupable, power, **kwargs)
 
 
 def vgg19(**kwargs):
     r"""VGG 19-layer model (configuration "E")
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg19', 'E', False, **kwargs)
+    return _vgg('vgg19', 'E', False, groupable, power, **kwargs)
 
 
-def vgg19_bn(**kwargs):
+def vgg19_bn(groupable=True, power=0.5, **kwargs):
     r"""VGG 19-layer model (configuration 'E') with batch normalization
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
     """
-    return _vgg('vgg19_bn', 'E', True, **kwargs)
+    return _vgg('vgg19_bn', 'E', True, groupable, power, **kwargs)
 
 #####################################################################################
 #####################################################################################
@@ -703,15 +705,15 @@ def _bn_function_factory(norm, relu, conv):
 
 
 class _DenseLayer(nn.Sequential):
-    def __init__(self, num_input_features, growth_rate, bn_size, drop_rate, groupable, memory_efficient=False):
+    def __init__(self, num_input_features, growth_rate, bn_size, drop_rate, groupable, power, memory_efficient=False):
         super(_DenseLayer, self).__init__()
         self.add_module('norm1', nn.BatchNorm2d(num_input_features)),
         self.add_module('relu1', nn.ReLU(inplace=True)),
-        self.add_module('conv1', GroupableConv2d(num_input_features, bn_size * growth_rate, 1, 1, 0, bias=False) if groupable \
+        self.add_module('conv1', GroupableConv2d(num_input_features, bn_size * growth_rate, 1, 1, 0, bias=False, power=power) if groupable \
                                  else nn.Conv2d(num_input_features, bn_size * growth_rate, 1, 1, 0, bias=False)),
         self.add_module('norm2', nn.BatchNorm2d(bn_size * growth_rate)),
         self.add_module('relu2', nn.ReLU(inplace=True)),
-        self.add_module('conv2', GroupableConv2d(bn_size * growth_rate, growth_rate, 3, 1, 1, bias=False) if groupable \
+        self.add_module('conv2', GroupableConv2d(bn_size * growth_rate, growth_rate, 3, 1, 1, bias=False, power=power) if groupable \
                                  else nn.Conv2d(bn_size * growth_rate, growth_rate, 3, 1, 1, bias=False)),
         self.drop_rate = drop_rate
         self.memory_efficient = memory_efficient
@@ -730,7 +732,7 @@ class _DenseLayer(nn.Sequential):
 
 
 class _DenseBlock(nn.Module):
-    def __init__(self, num_layers, num_input_features, bn_size, growth_rate, drop_rate, groupable, memory_efficient=False):
+    def __init__(self, num_layers, num_input_features, bn_size, growth_rate, drop_rate, groupable, power, memory_efficient=False):
         super(_DenseBlock, self).__init__()
         for i in range(num_layers):
             layer = _DenseLayer(
@@ -739,6 +741,7 @@ class _DenseBlock(nn.Module):
                 bn_size=bn_size,
                 drop_rate=drop_rate,
                 groupable=groupable,
+                power=power,
                 memory_efficient=memory_efficient,
             )
             self.add_module('denselayer%d' % (i + 1), layer)
@@ -752,11 +755,11 @@ class _DenseBlock(nn.Module):
 
 
 class _Transition(nn.Sequential):
-    def __init__(self, num_input_features, num_output_features, groupable):
+    def __init__(self, num_input_features, num_output_features, groupable, power):
         super(_Transition, self).__init__()
         self.add_module('norm', nn.BatchNorm2d(num_input_features))
         self.add_module('relu', nn.ReLU(inplace=True))
-        self.add_module('conv', GroupableConv2d(num_input_features, num_output_features, 1, 1, 0, bias=False) if groupable \
+        self.add_module('conv', GroupableConv2d(num_input_features, num_output_features, 1, 1, 0, bias=False, power=power) if groupable \
                                 else nn.Conv2d(num_input_features, num_output_features, 1, 1, 0, bias=False))
         self.add_module('pool', nn.AvgPool2d(kernel_size=2, stride=2))
 
@@ -779,10 +782,9 @@ class DenseNet(nn.Module):
 
     def __init__(self, growth_rate=32, block_config=(6, 12, 24, 16),
                  num_init_features=64, bn_size=4, drop_rate=0, num_classes=1000,
-                 groupable=True, memory_efficient=False):
+                 groupable=True, power=0.5, memory_efficient=False):
 
         super(DenseNet, self).__init__()
-
         # First convolution
         self.features = nn.Sequential(OrderedDict([
             ('conv0', nn.Conv2d(3, num_init_features, kernel_size=7, stride=2,
@@ -802,6 +804,7 @@ class DenseNet(nn.Module):
                 growth_rate=growth_rate,
                 drop_rate=drop_rate,
                 groupable=groupable,
+                power=power,
                 memory_efficient=memory_efficient
             )
             self.features.add_module('denseblock%d' % (i + 1), block)
@@ -809,7 +812,7 @@ class DenseNet(nn.Module):
             if i != len(block_config) - 1:
                 trans = _Transition(num_input_features=num_features,
                                     num_output_features=num_features // 2,
-                                    groupable=groupable)
+                                    groupable=groupable, power=power)
                 self.features.add_module('transition%d' % (i + 1), trans)
                 num_features = num_features // 2
 

@@ -2,7 +2,7 @@ import torch, os, argparse, time, warnings
 import numpy as np
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
-import model
+from model import *
 from tensorboardX import SummaryWriter
 from thop import profile
 # DALI data reader
@@ -162,9 +162,9 @@ def main():
     
     # model and optimizer
     if "res" in args.arch:
-        model_name = "model.%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
-    elif "vgg" in args.arch or "densenet" in args.arch:
-        model_name = "model.%s(num_classes=%d, groupable=False)" % (args.arch, args.num_classes)
+        model_name = "%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
+    elif "vgg" in args.arch or "dense" in args.arch:
+        model_name = "%s(num_classes=%d, groupable=False)" % (args.arch, args.num_classes)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")

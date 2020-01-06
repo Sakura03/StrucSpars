@@ -2,10 +2,9 @@ import torch, os, argparse, time
 import numpy as np
 from os.path import join, isfile, abspath
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, cifar10, cifar100, MultiStepLR
-from model import GroupableConv2d
+from model import * 
 from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold, impose_group_lasso
 from utils import set_group_levels, update_permutation_matrix, mask_group, real_group
-import model
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 
@@ -75,7 +74,7 @@ def main():
         args.num_classes = 100
 
     # model and optimizer
-    model_name = "model.resnet%d_cifar(num_classes=%d, groupable=True)" % (args.depth, args.num_classes)
+    model_name = "resnet%d_cifar(num_classes=%d, groupable=True)" % (args.depth, args.num_classes)
     model = eval(model_name).cuda()
     flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
     tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)

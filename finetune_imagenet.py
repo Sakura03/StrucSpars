@@ -2,10 +2,9 @@ import torch, os, argparse, time, warnings
 import numpy as np
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
-from model import GroupableConv2d
+from model import *
 from utils import get_factors, get_sparsity, get_threshold
 from utils import set_group_levels, mask_group, real_group
-import model
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 # DALI data reader
@@ -170,8 +169,11 @@ def main():
     train_loader_len = int(train_loader._size / args.batch_size)
     
     # model and optimizer
-    group1x1 = "True" if args.group1x1 else "False"
-    model_name = "model.%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
+    if "res" in args.arch:
+        group1x1 = "True" if args.group1x1 else "False"
+        model_name = "%s(num_classes=%d, group1x1=%s)" % (args.arch, args.num_classes, group1x1)
+    elif "vgg" in args.arch or "dense" in args.arch:
+        model_name = "%s(num_classes=%d, groupable=True)" % (args.arch, args.num_classes)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")

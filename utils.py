@@ -129,7 +129,7 @@ def synchronize_model(model):
 
 @torch.no_grad()
 def init_params(model):
-    for m in self.modules():
+    for m in model.modules():
         if isinstance(m, (torch.nn.Conv2d, GroupableConv2d)):
             torch.nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
         elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.GroupNorm)):
@@ -138,7 +138,7 @@ def init_params(model):
 
 @torch.no_grad()
 def repermute_matrices(model, random=False):
-    for m in self.modules():
+    for m in model.modules():
         if isinstance(m, GroupableConv2d):
             if random:
                 m.P = torch.randperm(64).to(m.P.device)

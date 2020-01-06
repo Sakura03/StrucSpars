@@ -1,11 +1,11 @@
 python -m torch.distributed.launch --nproc_per_node=4 finetune_imagenet.py \
-                                   -a "resnext50_32x4d" \
+                                   -a "resnet50" \
                                    --data "/home/andrew/Datasets/ilsvrc12-rec" \
-                                   --tmp "results/imagenet-resnext50-delta-lambda1e-5-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.67-adjust-lambda-finetune" \
-                                   --resume "results/imagenet-resnext50-delta-lambda1e-5-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.67-adjust-lambda/checkpoint-epoch59.pth" \
+                                   --tmp "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.65-adjust-lambda-finetune" \
+                                   --resume "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.65-adjust-lambda/checkpoint.pth" \
                                    --batch-size "64" \
                                    --use-rec \
                                    --dali-cpu \
                                    --warmup "5" \
                                    --group1x1 \
-				   --percent "0.67"
+				   --percent "0.65"

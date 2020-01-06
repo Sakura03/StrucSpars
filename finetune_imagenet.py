@@ -242,10 +242,17 @@ def main():
 
         group_levels = mask_group(model.module, factors, thres, logger=logger if args.local_rank == 0 else None)
         torch.save(group_levels, join(args.tmp, "group_levels.pth"))
-
         if args.local_rank == 0:
             logger.info("evaluating after grouping...")
         acc1, acc5 = validate(val_loader, model)
+
+        ### TODO: remove this for final release
+        init_params(model.module)
+        repermute_matrices(model.module, random=True)
+        if args.local_rank == 0:
+            logger.info("evaluating after re-initialization...")
+        acc1, acc5 = validate(val_loader, model)
+        ### Till here
 
         # real grouping
         # real_group(model.module)

@@ -1,7 +1,7 @@
 python -m torch.distributed.launch --nproc_per_node=4 finetune_imagenet.py \
                                    -a "resnet50" \
                                    --data "/home/andrew/Datasets/ilsvrc12-rec" \
-                                   --tmp "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.65-adjust-lambda-finetune" \
+                                   --tmp "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.65-adjust-lambda-finetune-from-scratch" \
                                    --resume "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-group1x1-wd0-percent0.65-adjust-lambda/checkpoint.pth" \
                                    --batch-size "64" \
                                    --use-rec \

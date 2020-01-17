@@ -268,7 +268,7 @@ def main():
             tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-1)
     else:
         set_group_levels(model.module, group_levels)
-        for m in model.module.named_modules():
+        for m in model.module.modules():
             if isinstance(m, GroupableConv2d):
                 m.mask_group()
                 # m.real_group()

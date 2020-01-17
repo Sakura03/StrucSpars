@@ -215,7 +215,7 @@ def main():
     set_group_levels(model, group_levels)
    
     model_sparsity = get_sparsity(factors, thres=thres)
-    flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
+    flops, params = profile(m, inputs=(torch.randn(1, 3, 32, 32).cuda(),), custom_ops=custom_ops, verbose=False)
     del m
     torch.cuda.empty_cache()
     logger.info("Threshold %.3e, final sparsity %.6f, target sparsity %.6f, %.3e FLOPs, %.3e params" % (thres, model_sparsity, args.percent, flops, params))

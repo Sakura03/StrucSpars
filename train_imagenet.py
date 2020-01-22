@@ -165,6 +165,8 @@ def main():
         model_name = "%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
     elif "vgg" in args.arch or "dense" in args.arch:
         model_name = "%s(num_classes=%d, groupable=False)" % (args.arch, args.num_classes)
+    elif "shuffle" in args.arch:
+        model_name = "%s(num_classes=%d, groupable=False, groups=8)" % (args.arch, args.num_classes)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")

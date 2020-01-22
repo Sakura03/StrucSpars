@@ -185,7 +185,7 @@ def main():
     if "res" in args.arch:
         group1x1 = "True" if args.group1x1 else "False"
         model_name = "%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
-    elif "vgg" in args.arch or "dense" in args.arch:
+    elif "vgg" in args.arch or "dense" in args.arch or "shuffle" in args.arch:
         model_name = "%s(num_classes=%d, groupable=True, power=%f)" % (args.arch, args.num_classes, args.power)
     model = eval(model_name).cuda()
     if args.local_rank == 0:

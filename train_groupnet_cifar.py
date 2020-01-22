@@ -191,7 +191,7 @@ def main():
         tfboard_writer.add_scalar('test/acc1-epoch', acc1, epoch)
         tfboard_writer.add_scalar('test/acc5-epoch', acc5, epoch)
 
-        torch.save(factors, join(args.tmp, "factors", "after-permutation.pth"))
+        torch.save(factors, join(args.tmp, "factors", "epoch%03d.pth"%epoch))
         for k, v in factors.items():
             tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=epoch)
 

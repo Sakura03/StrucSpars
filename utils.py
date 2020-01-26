@@ -135,6 +135,9 @@ def init_params(model):
         elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.GroupNorm)):
             torch.nn.init.constant_(m.weight, 1.)
             torch.nn.init.constant_(m.bias, 0.)
+            torch.nn.init.constant_(m.running_mean, 0.)
+            torch.nn.init.constant_(m.running_var, 1.)
+            m.num_batches_tracked.zero_()
 
 @torch.no_grad()
 def repermute_matrices(model, random=False):

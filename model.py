@@ -10,7 +10,7 @@ __all__ = ['GroupableConv2d', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'wide_resnet101_2', 'resnet20_cifar', 'resnet32_cifar', 'resnet44_cifar',
            'resnet56_cifar', 'resnet110_cifar', 'resnet1202_cifar', 'vgg11', 'vgg13',
            'vgg16', 'vgg19', 'vgg11_bn', 'vgg13_bn', 'vgg16_bn', 'vgg19_bn',
-           'densenet121', 'densenet161', 'densenet169', 'densenet201', 'shufflenet']
+           'densenet121', 'densenet161', 'densenet169', 'densenet201', 'shufflenet_v1']
 
 #####################################################################################
 #####################################################################################
@@ -904,7 +904,169 @@ def densenet201(**kwargs):
 
 #####################################################################################
 #####################################################################################
-#### ShuffleNet model for ImageNet
+#### ShuffleNet V1 model for ImageNet
+#####################################################################################
+#####################################################################################
+
+class ShuffleV1Block(nn.Module):
+    def __init__(self, inp, oup, group, first_group, mid_channels, ksize, stride, groupable=True, power=0.5):
+        super(ShuffleV1Block, self).__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+
+        self.mid_channels = mid_channels
+        self.ksize = ksize
+        pad = ksize // 2
+        self.pad = pad
+        self.inp = inp
+        self.group = group
+        self.groupable = groupable
+
+        if stride == 2:
+            outputs = oup - inp
+        else:
+            outputs = oup
+
+        branch_main_1 = [
+            # pw
+            GroupableConv2d(inp, mid_channels, 1, 1, 0, bias=False, power=power) if (groupable and not first_group) \
+            else nn.Conv2d(inp, mid_channels, 1, 1, 0, groups=1 if first_group else group, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            # dw
+            GroupableConv2d(mid_channels, mid_channels, ksize, stride, pad, bias=False, power=power) if groupable \
+            else nn.Conv2d(mid_channels, mid_channels, ksize, stride, pad, groups=mid_channels, bias=False),
+            nn.BatchNorm2d(mid_channels),
+        ]
+        branch_main_2 = [
+            # pw-linear
+            GroupableConv2d(mid_channels, outputs, 1, 1, 0, bias=False, power=power) if groupable \
+            else nn.Conv2d(mid_channels, outputs, 1, 1, 0, groups=group, bias=False),
+            nn.BatchNorm2d(outputs),
+        ]
+        self.branch_main_1 = nn.Sequential(*branch_main_1)
+        self.branch_main_2 = nn.Sequential(*branch_main_2)
+        self.relu = nn.ReLU(inplace=True)
+
+        if stride == 2:
+            self.branch_proj = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
+
+    def forward(self, old_x):
+        x = old_x
+        x_proj = old_x
+        x = self.branch_main_1(x)
+        if (self.group > 1 and not self.groupable):
+            x = self.channel_shuffle(x)
+        x = self.branch_main_2(x)
+        if self.stride == 1:
+            return self.relu(x + x_proj)
+        elif self.stride == 2:
+            return torch.cat((self.branch_proj(x_proj), self.relu(x)), 1)
+
+    def channel_shuffle(self, x):
+        batchsize, num_channels, height, width = x.data.size()
+        assert num_channels % self.group == 0
+        group_channels = num_channels // self.group
+        
+        x = x.reshape(batchsize, group_channels, self.group, height, width)
+        x = x.permute(0, 2, 1, 3, 4)
+        x = x.reshape(batchsize, num_channels, height, width)
+
+        return x
+    
+class ShuffleNetV1(nn.Module):
+    def __init__(self, num_classes=1000, model_size='1.0x', group=8, groupable=True, power=0.5):
+        super(ShuffleNetV1, self).__init__()
+        assert group in [3, 8], "Param::group must be either 3 or 8."
+        assert model_size in ['0.5x', '1.0x', '1.5x', '2.0x'], \
+               "Param::model_size must in ['0.5x', '1.0x', '1.5x', '2.0x']."
+
+        self.stage_repeats = [4, 8, 4]
+        self.model_size = model_size
+        if group == 3:
+            if model_size == '0.5x':
+                self.stage_out_channels = [-1, 12, 120, 240, 480]
+            elif model_size == '1.0x':
+                self.stage_out_channels = [-1, 24, 240, 480, 960]
+            elif model_size == '1.5x':
+                self.stage_out_channels = [-1, 24, 360, 720, 1440]
+            elif model_size == '2.0x':
+                self.stage_out_channels = [-1, 48, 480, 960, 1920]
+        elif group == 8:
+            if model_size == '0.5x':
+                self.stage_out_channels = [-1, 16, 192, 384, 768]
+            elif model_size == '1.0x':
+                self.stage_out_channels = [-1, 24, 384, 768, 1536]
+            elif model_size == '1.5x':
+                self.stage_out_channels = [-1, 24, 576, 1152, 2304]
+            elif model_size == '2.0x':
+                self.stage_out_channels = [-1, 48, 768, 1536, 3072]
+
+        # building first layer
+        input_channel = self.stage_out_channels[1]
+        self.first_conv = nn.Sequential(
+                nn.Conv2d(3, input_channel, 3, 2, 1, bias=False),
+                nn.BatchNorm2d(input_channel),
+                nn.ReLU(inplace=True),
+                )
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        self.features = []
+        for idxstage in range(len(self.stage_repeats)):
+            numrepeat = self.stage_repeats[idxstage]
+            output_channel = self.stage_out_channels[idxstage+2]
+
+            for i in range(numrepeat):
+                stride = 2 if i == 0 else 1
+                first_group = idxstage == 0 and i == 0
+                self.features.append(ShuffleV1Block(input_channel, output_channel,
+                                            group=group, first_group=first_group,
+                                            mid_channels=output_channel // 4, ksize=3,
+                                            stride=stride, groupable=groupable, power=power))
+                input_channel = output_channel
+
+        self.features = nn.Sequential(*self.features)
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        self.classifier = nn.Linear(self.stage_out_channels[-1], num_classes, bias=False)
+        self._initialize_weights()
+
+    def forward(self, x):
+        x = self.first_conv(x)
+        x = self.maxpool(x)
+        x = self.features(x)
+
+        x = self.avgpool(x)
+        x = x.contiguous().view(-1, self.stage_out_channels[-1])
+        x = self.classifier(x)
+        return x
+
+    def _initialize_weights(self):
+        for name, m in self.named_modules():
+            if isinstance(m, (nn.Conv2d, GroupableConv2d)):
+                if 'first' in name:
+                    nn.init.normal_(m.weight, 0, 0.01)
+                else:
+                    nn.init.normal_(m.weight, 0, 1.0 / m.weight.shape[1])
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0001)
+                nn.init.constant_(m.running_mean, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+def shufflenet_v1(**kwargs):
+    return ShuffleNetV1(**kwargs)
+
+#####################################################################################
+#####################################################################################
+#### ShuffleNet V2 model for ImageNet
 #####################################################################################
 #####################################################################################
 
@@ -924,256 +1086,6 @@ def channel_shuffle(x, groups):
     x = x.view(batchsize, -1, height, width)
 
     return x
-
-
-class ShuffleUnit(nn.Module):
-    def __init__(self, in_channels, out_channels, groups=3, grouped_conv=True,
-                 combine='add', groupable=True, power=0.5):
-        super(ShuffleUnit, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.grouped_conv = grouped_conv
-        self.combine = combine
-        self.groups = groups
-        self.bottleneck_channels = self.out_channels // 4
-
-        # define the type of ShuffleUnit
-        if self.combine == 'add':
-            # ShuffleUnit Figure 2b
-            self.depthwise_stride = 1
-            self._combine_func = self._add
-        elif self.combine == 'concat':
-            self.avgpool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
-            # ShuffleUnit Figure 2c
-            self.depthwise_stride = 2
-            self._combine_func = self._concat
-            
-            # ensure output of concat has the same channels as 
-            # original output channels.
-            self.out_channels -= self.in_channels
-        else:
-            raise ValueError("Cannot combine tensors with \"{}\"" \
-                             "Only \"add\" and \"concat\" are" \
-                             "supported".format(self.combine))
-
-        # Use a 1x1 grouped or non-grouped convolution to reduce input channels
-        # to bottleneck channels, as in a ResNet bottleneck module.
-        # NOTE: Do not use group convolution for the first conv1x1 in Stage 2.
-        self.first_1x1_groups = self.groups if grouped_conv else 1
-
-        self.g_conv_1x1_compress = self._make_grouped_conv1x1(
-            self.in_channels,
-            self.bottleneck_channels,
-            self.first_1x1_groups,
-            batch_norm=True,
-            relu=True,
-            groupable=groupable if grouped_conv else False,
-            power=power
-            )
-
-        # 3x3 depthwise convolution followed by batch normalization
-        self.depthwise_conv3x3 = conv3x3(
-            self.bottleneck_channels, self.bottleneck_channels,
-            stride=self.depthwise_stride, groups=self.bottleneck_channels,
-            groupable=groupable, power=power)
-        self.bn_after_depthwise = nn.BatchNorm2d(self.bottleneck_channels)
-
-        # Use 1x1 grouped convolution to expand from 
-        # bottleneck_channels to out_channels
-        self.g_conv_1x1_expand = self._make_grouped_conv1x1(
-            self.bottleneck_channels,
-            self.out_channels,
-            self.groups,
-            batch_norm=True,
-            relu=False,
-            groupable=groupable,
-            power=power
-            )
-        self.relu = nn.ReLU(inplace=True)
-
-
-    @staticmethod
-    def _add(x, out):
-        # residual connection
-        return x + out
-
-
-    @staticmethod
-    def _concat(x, out):
-        # concatenate along channel axis
-        return torch.cat((x, out), 1)
-
-
-    def _make_grouped_conv1x1(self, in_channels, out_channels, groups, batch_norm=True,
-                              relu=False, groupable=True, power=0.5):
-
-        modules = OrderedDict()
-
-        conv = conv1x1(in_channels, out_channels, groups=groups, groupable=groupable, power=power)
-        modules['conv1x1'] = conv
-
-        if batch_norm:
-            modules['batch_norm'] = nn.BatchNorm2d(out_channels)
-        if relu:
-            modules['relu'] = nn.ReLU(inplace=True)
-        if len(modules) > 1:
-            return nn.Sequential(modules)
-        else:
-            return conv
-
-
-    def forward(self, x):
-        # save for combining later with output
-        residual = x
-
-        if self.combine == 'concat':
-            residual = self.avgpool(residual)
-
-        out = self.g_conv_1x1_compress(x)
-        out = channel_shuffle(out, self.groups)
-        out = self.depthwise_conv3x3(out)
-        out = self.bn_after_depthwise(out)
-        out = self.g_conv_1x1_expand(out)
-        
-        out = self._combine_func(residual, out)
-        return self.relu(out)
-
-
-class ShuffleNet(nn.Module):
-    """ShuffleNet implementation.
-    """
-
-    def __init__(self, groups=8, in_channels=3, num_classes=1000, groupable=True, power=0.5):
-        """ShuffleNet constructor.
-        Arguments:
-            groups (int, optional): number of groups to be used in grouped 
-                1x1 convolutions in each ShuffleUnit. Default is 3 for best
-                performance according to original paper.
-            in_channels (int, optional): number of channels in the input tensor.
-                Default is 3 for RGB image inputs.
-            num_classes (int, optional): number of classes to predict. Default
-                is 1000 for ImageNet.
-        """
-        super(ShuffleNet, self).__init__()
-        self.groups = groups
-        self.stage_repeats = [3, 7, 3]
-        self.in_channels =  in_channels
-        self.num_classes = num_classes
-        self.power = power
-        self.groupable = groupable
-
-        # index 0 is invalid and should never be called.
-        # only used for indexing convenience.
-        if groups == 1:
-            self.stage_out_channels = [-1, 24, 144, 288, 576]
-        elif groups == 2:
-            self.stage_out_channels = [-1, 24, 200, 400, 800]
-        elif groups == 3:
-            self.stage_out_channels = [-1, 24, 240, 480, 960]
-        elif groups == 4:
-            self.stage_out_channels = [-1, 24, 272, 544, 1088]
-        elif groups == 8:
-            self.stage_out_channels = [-1, 24, 384, 768, 1536]
-        else:
-            raise ValueError(
-                """Groups of {} is not supported for
-                   1x1 Grouped Convolutions""".format(groups))
-        
-        # Stage 1 always has 24 output channels
-        self.conv1 = conv3x3(self.in_channels, self.stage_out_channels[1], stride=2, groupable=False)
-        self.bn1 = nn.BatchNorm2d(self.stage_out_channels[1])
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        # Stage 2
-        self.stage2 = self._make_stage(2)
-        # Stage 3
-        self.stage3 = self._make_stage(3)
-        # Stage 4
-        self.stage4 = self._make_stage(4)
-
-        # Fully-connected classification layer
-        num_inputs = self.stage_out_channels[-1]
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(num_inputs, self.num_classes)
-        self.init_params()
-
-
-    def init_params(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, GroupableConv2d)):
-                init.kaiming_normal_(m.weight, mode='fan_out')
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                init.normal_(m.weight, std=0.001)
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-
-
-    def _make_stage(self, stage):
-        modules = OrderedDict()
-        stage_name = "ShuffleUnit_Stage{}".format(stage)
-        
-        # First ShuffleUnit in the stage
-        # 1. non-grouped 1x1 convolution (i.e. pointwise convolution)
-        #   is used in Stage 2. Group convolutions used everywhere else.
-        grouped_conv = stage > 2
-        
-        # 2. concatenation unit is always used.
-        first_module = ShuffleUnit(
-            self.stage_out_channels[stage-1],
-            self.stage_out_channels[stage],
-            groups=self.groups,
-            grouped_conv=grouped_conv,
-            combine='concat',
-            groupable=self.groupable,
-            power=self.power
-            )
-        modules[stage_name+"_0"] = first_module
-
-        # add more ShuffleUnits depending on pre-defined number of repeats
-        for i in range(self.stage_repeats[stage-2]):
-            name = stage_name + "_{}".format(i+1)
-            module = ShuffleUnit(
-                self.stage_out_channels[stage],
-                self.stage_out_channels[stage],
-                groups=self.groups,
-                grouped_conv=True,
-                combine='add',
-                groupable=self.groupable,
-                power=self.power
-                )
-            modules[name] = module
-
-        return nn.Sequential(modules)
-
-
-    def forward(self, x):
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.maxpool(x)
-
-        x = self.stage2(x)
-        x = self.stage3(x)
-        x = self.stage4(x)
-
-        # global average pooling layer
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return x
-
-def shufflenet(**kwargs):
-    return ShuffleNet(**kwargs)
-
-#####################################################################################
-#####################################################################################
-#### ShuffleNet V2 model for ImageNet
-#####################################################################################
-#####################################################################################
 
 class InvertedResidual(nn.Module):
     def __init__(self, inp, oup, stride):

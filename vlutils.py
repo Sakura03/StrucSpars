@@ -108,7 +108,7 @@ def cifar100(path='data/cifar100', bs=256, num_workers=8):
     return train_loader, test_loader
 
 class CosAnnealingLR(object):
-    def __init__(self, loader_len, epochs, lr_max, lr_min=0, warmup_epochs=0, last_epoch=-1):
+    def __init__(self, loader_len, epochs, lr_max, warmup_epochs=0, last_epoch=-1):
         max_iters = loader_len * epochs
         warmup_iters = loader_len * warmup_epochs
         assert lr_max >= 0
@@ -117,7 +117,6 @@ class CosAnnealingLR(object):
 
         self.max_iters = max_iters
         self.lr_max = lr_max
-        self.lr_min = lr_min
         self.warmup_iters = warmup_iters
         self.last_epoch = last_epoch
 
@@ -137,6 +136,36 @@ class CosAnnealingLR(object):
         else:
             self.lr = (1 + math.cos((self.iter_counter-self.warmup_iters) / \
                                     (self.max_iters - self.warmup_iters) * math.pi)) / 2 * self.lr_max
+        return self.lr
+
+class LinearLR(object):
+    def __init__(self, loader_len, epochs, lr_max, warmup_epochs=0, last_epoch=-1):
+        max_iters = loader_len * epochs
+        warmup_iters = loader_len * warmup_epochs
+        assert lr_max >= 0
+        assert warmup_iters >= 0
+        assert max_iters >= 0 and max_iters >= warmup_iters
+
+        self.max_iters = max_iters
+        self.lr_max = lr_max
+        self.warmup_iters = warmup_iters
+        self.last_epoch = last_epoch
+
+        assert self.last_epoch >= -1
+        self.iter_counter = (self.last_epoch+1) * loader_len
+        self.lr = 0 
+    
+    def restart(self, lr_max=None):
+        if lr_max:
+            self.lr_max = lr_max
+        self.iter_counter = 0 
+
+    def step(self):
+        self.iter_counter += 1
+        if self.warmup_iters > 0 and self.iter_counter <= self.warmup_iters:
+            self.lr = float(self.iter_counter / self.warmup_iters) * self.lr_max
+        else:
+            self.lr = (1. - (self.iter_counter - self.warmup_iters) / (self.max_iters - self.warmup_iters)) * self.lr_max
         return self.lr
 
 class MultiStepLR(object):

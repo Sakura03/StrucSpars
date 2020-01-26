@@ -46,7 +46,7 @@ parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
 
 parser.add_argument('--group1x1', action="store_true", help='set true to group conv1x1')
 parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
-parser.add_argument('--finetune-lr', type=int, default=1e-1, help="finetune lr")
+parser.add_argument('--finetune-lr', type=float, default=0.1, help="finetune lr")
 parser.add_argument('--finetune-epochs', type=int, default=120, help="finetune epochs")
 parser.add_argument('--finetune-weight-decay', type=float, default=1e-4, help="finetune weight decay")
 parser.add_argument('--restart-finetune', action="store_true", help='set true to restart finetune')

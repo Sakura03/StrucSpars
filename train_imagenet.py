@@ -1,7 +1,7 @@
 import torch, os, argparse, time, warnings
 import numpy as np
 from os.path import join, isfile
-from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
+from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR, LinearLR
 from model import *
 from tensorboardX import SummaryWriter
 from thop import profile
@@ -21,6 +21,7 @@ parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--print-freq', default=50, type=int, metavar='N', help='print frequency (default: 50)')
 parser.add_argument('-a', '--arch', default='resnet50', type=str, metavar='STR', help='model architecture')
+parser.add_argument('--lightweight', action='store_true', help="Train lightweight models (different training strategies)")
 parser.add_argument('--data', metavar='DIR', default="./data", help='path to dataset')
 parser.add_argument('--num-classes', default=1000, type=int, metavar='N', help='Number of classes')
 parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers')
@@ -41,7 +42,7 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--dali-cpu', action='store_true', help='Runs CPU based version of DALI pipeline.')
 parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
 
-parser.add_argument('--lr', '--learning-rate', type=int, default=1e-1, help="learning rate")
+parser.add_argument('--lr', '--learning-rate', type=float, default=0.1, help="learning rate")
 parser.add_argument('--epochs', type=int, default=120, help="epochs")
 parser.add_argument('--wd', '--weight-decay', type=float, default=1e-4, help="weight decay")
 args = parser.parse_args()
@@ -70,6 +71,11 @@ class HybridTrainPipe(Pipeline):
                                                  random_aspect_ratio=[0.8, 1.25],
                                                  random_area=[0.1, 1.0],
                                                  num_attempts=100)
+        if args.lightweight:
+            self.twist = ops.ColorTwist(device=dali_device)
+            self.saturation = ops.Uniform(range=[0.6, 1.4])
+            self.contrast = ops.Uniform(range=[0.6, 1.4])
+            self.brightness = ops.Uniform(range=[-0.5, 0.5])
         self.res = ops.Resize(device=dali_device, resize_x=crop, resize_y=crop, interp_type=types.INTERP_TRIANGULAR)
         self.cmnp = ops.CropMirrorNormalize(device="gpu",
                                             output_dtype=types.FLOAT,
@@ -85,6 +91,8 @@ class HybridTrainPipe(Pipeline):
         rng = self.coin()
         self.jpegs, self.labels = self.input(name="Reader")
         images = self.decode(self.jpegs)
+        if args.lightweight:
+            images = self.twist(images, saturation=self.saturation(), contrast=self.contrast(), brightness=self.brightness())
         images = self.res(images)
         output = self.cmnp(images.gpu(), mirror=rng)
         return [output, self.labels]
@@ -165,8 +173,8 @@ def main():
         model_name = "%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
     elif "vgg" in args.arch or "dense" in args.arch:
         model_name = "%s(num_classes=%d, groupable=False)" % (args.arch, args.num_classes)
-    elif "shuffle" in args.arch:
-        model_name = "%s(num_classes=%d, groupable=False, groups=8)" % (args.arch, args.num_classes)
+    elif "shufflenet_v1" in args.arch:
+        model_name = "%s(num_classes=%d, groupable=False, group=8)" % (args.arch, args.num_classes)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")
@@ -199,7 +207,9 @@ def main():
         args.start_epoch = 0
         if args.local_rank == 0: best_acc1 = 0    
     
-    scheduler = CosAnnealingLR(loader_len=train_loader_len, epochs=args.epochs,
+    # scheduler_func = LinearLR if args.lightweight else CosAnnealingLR
+    scheduler_func = CosAnnealingLR
+    scheduler = scheduler_func(loader_len=train_loader_len, epochs=args.epochs,
                                lr_max=args.lr, warmup_epochs=args.warmup,
                                last_epoch=args.start_epoch-1)
     

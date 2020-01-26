@@ -248,7 +248,7 @@ def main():
 
         ### TODO: remove this for final release
         init_params(model.module)
-        repermute_matrices(model.module, random=False)
+        # repermute_matrices(model.module, random=True)
         if args.local_rank == 0:
             logger.info("evaluating after re-initialization...")
         acc1, acc5 = validate(val_loader, model)

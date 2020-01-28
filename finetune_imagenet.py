@@ -45,6 +45,9 @@ parser.add_argument('--dali-cpu', action='store_true', help='Runs CPU based vers
 parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
 
 parser.add_argument('--group1x1', action="store_true", help='set true to group conv1x1')
+parser.add_argument('--reinit-params', action="store_true", help='set true to re-initialize model parameters (training from scratch)')
+parser.add_argument('--shuffle-type', default='learned', type=str, metavar='TYPE', choices=['learned', 'none', 'random', 'shufflenet'],
+                    help='specify the channel shuffle patterns (valid: learned, none, random, shufflenet)')
 parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
 parser.add_argument('--finetune-lr', type=float, default=0.1, help="finetune lr")
 parser.add_argument('--finetune-epochs', type=int, default=120, help="finetune epochs")
@@ -246,13 +249,13 @@ def main():
             logger.info("evaluating after grouping...")
         acc1, acc5 = validate(val_loader, model)
 
-        ### TODO: remove this for final release
-        init_params(model.module)
-        repermute_matrices(model.module, random=False)
-        if args.local_rank == 0:
-            logger.info("evaluating after re-initialization...")
-        acc1, acc5 = validate(val_loader, model)
-        ### Till here
+        if args.reinit_params:
+            init_params(model.module)
+        repermute_matrices(model.module, shuffle_type=args.shuffle_type)
+        if args.reinit_params:
+            if args.local_rank == 0:
+                logger.info("evaluating after re-initialization with shuffle type %s..." % args.shuffle_type)
+            acc1, acc5 = validate(val_loader, model)
 
         # real grouping
         # real_group(model.module)

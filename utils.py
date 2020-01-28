@@ -135,18 +135,27 @@ def init_params(model):
         elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.GroupNorm)):
             torch.nn.init.constant_(m.weight, 1.)
             torch.nn.init.constant_(m.bias, 0.)
+            torch.nn.init.constant_(m.running_mean, 0.)
+            torch.nn.init.constant_(m.running_var, 1.)
+            m.num_batches_tracked.zero_()
 
 @torch.no_grad()
-def repermute_matrices(model, random=False):
+def repermute_matrices(model, shuffle_type='learned'):
+    assert shuffle_type.lower() in ['random', 'none', 'shufflenet', 'learned']
+    if shuffle_type.lower() == 'learned': return
     for m in model.modules():
         if isinstance(m, GroupableConv2d):
-            if random:
+            if shuffle_type.lower() == 'random':
                 m.P = torch.randperm(len(m.P)).to(m.P.device)
                 m.Q = torch.randperm(len(m.Q)).to(m.Q.device)
                 m.P_inv, m.Q_inv = torch.argsort(m.P), torch.argsort(m.Q)
-            else:
+            elif shuffle_type.lower() == 'none':
                 m.P = torch.arange(len(m.P)).to(m.P.device)
                 m.Q = torch.arange(len(m.Q)).to(m.Q.device)
                 m.P_inv, m.Q_inv = torch.argsort(m.P), torch.argsort(m.Q)
+            elif shuffle_type.lower() == 'shufflenet':
+                groups = 2 ** (m.group_level-1)
+                m.P = torch.arange(len(m.P)).reshape(groups, -1).t().reshape(-1).to(m.P.device)
+                m.Q = torch.arange(len(m.Q)).reshape(groups, -1).t().reshape(-1).to(m.Q.device)
             m.mask_group()
 

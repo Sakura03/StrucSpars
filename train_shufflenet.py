@@ -1,7 +1,8 @@
 import torch, os, argparse, time, warnings
-import numpy as np
+import torch.nn as nn
 from os.path import join, isfile
-from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
+from utils import DataIterator, CrossEntropyLabelSmooth, get_parameters
+from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, LinearLR
 from model import *
 from tensorboardX import SummaryWriter
 from thop import profile
@@ -17,19 +18,23 @@ from apex.fp16_utils import FP16_Optimizer, BN_convert_float
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 warnings.simplefilter('error')
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+parser = argparse.ArgumentParser(description='PyTorch ImageNet Training of ShuffleNetV1')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--print-freq', default=50, type=int, metavar='N', help='print frequency (default: 50)')
-parser.add_argument('-a', '--arch', default='resnet50', type=str, metavar='STR', help='model architecture')
+parser.add_argument('--val-freq', default=10000, type=int, metavar='N', help='validation frequency (default: 10000)')
+parser.add_argument('-a', '--arch', default='shufflenet_v1', type=str, metavar='STR', help='model architecture')
+parser.add_argument('--group', type=int, default=3, metavar='N', help='group number')
+parser.add_argument('--model-size', type=str, default='1.0x', choices=['0.5x', '1.0x', '1.5x', '2.0x'], help='size of the model')
 parser.add_argument('--data', metavar='DIR', default="./data", help='path to dataset')
 parser.add_argument('--num-classes', default=1000, type=int, metavar='N', help='Number of classes')
-parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers')
-parser.add_argument('--batch-size', default=64, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('-j', '--workers', default=8, type=int, help='number of data loading workers')
+parser.add_argument('--batch-size', default=256, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--imsize', default=256, type=int, metavar='N', help='image resize size')
 parser.add_argument('--imcrop', default=224, type=int, metavar='N', help='image crop size')
 parser.add_argument('--warmup', default=5, type=int, help="warmup epochs (small lr and do not impose sparsity)")
 parser.add_argument('--gamma', default=0.1, type=float, metavar='GM', help='decrease learning rate by gamma')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
+parser.add_argument('--label-smooth', type=float, default=0.1, help='label smoothing')
 parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to the latest checkpoint')
 parser.add_argument('--tmp', default="results/tmp", type=str, help='tmp folder')
 # FP16
@@ -41,9 +46,9 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--dali-cpu', action='store_true', help='Runs CPU based version of DALI pipeline.')
 parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
 
-parser.add_argument('--lr', '--learning-rate', type=float, default=0.1, help="learning rate")
-parser.add_argument('--epochs', type=int, default=120, help="epochs")
-parser.add_argument('--wd', '--weight-decay', type=float, default=1e-4, help="weight decay")
+parser.add_argument('--lr', '--learning-rate', type=float, default=0.5, help=" init learning rate")
+parser.add_argument('--total-iters', type=int, default=300000, help="total iterations")
+parser.add_argument('--wd', '--weight-decay', type=float, default=4e-5, help="weight decay")
 args = parser.parse_args()
 
 # DALI pipelines
@@ -70,6 +75,10 @@ class HybridTrainPipe(Pipeline):
                                                  random_aspect_ratio=[0.8, 1.25],
                                                  random_area=[0.1, 1.0],
                                                  num_attempts=100)
+        self.twist = ops.ColorTwist(device=dali_device)
+        self.saturation = ops.Uniform(range=[0.6, 1.4])
+        self.contrast = ops.Uniform(range=[0.6, 1.4])
+        self.brightness = ops.Uniform(range=[0.6, 1.4])
         self.res = ops.Resize(device=dali_device, resize_x=crop, resize_y=crop, interp_type=types.INTERP_TRIANGULAR)
         self.cmnp = ops.CropMirrorNormalize(device="gpu",
                                             output_dtype=types.FLOAT,
@@ -85,6 +94,7 @@ class HybridTrainPipe(Pipeline):
         rng = self.coin()
         self.jpegs, self.labels = self.input(name="Reader")
         images = self.decode(self.jpegs)
+        images = self.twist(images, saturation=self.saturation(), contrast=self.contrast(), brightness=self.brightness())
         images = self.res(images)
         output = self.cmnp(images.gpu(), mirror=rng)
         return [output, self.labels]
@@ -117,7 +127,7 @@ torch.backends.cudnn.benchmark = True
 os.makedirs(args.tmp, exist_ok=True)
 
 # loss function
-criterion = torch.nn.CrossEntropyLoss()
+criterion_smooth = CrossEntropyLabelSmooth(1000, args.label_smooth).cuda()
 
 if args.local_rank == 0:
     tfboard_writer = SummaryWriter(log_dir=args.tmp)
@@ -152,21 +162,19 @@ def main():
                            crop=args.imcrop, dali_cpu=args.dali_cpu)
     pipe.build()
     train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
+    train_dataprovider = DataIterator(train_loader)
+    print(int(train_dataprovider.dataloader._size/args.batch_size)) ###TODO: tmp
 
     pipe = HybridValPipe(batch_size=50, num_threads=args.workers,
                          device_id=args.local_rank, data_dir=valdir,
                          crop=args.imcrop, size=args.imsize)
     pipe.build()
     val_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
-    train_loader_len = int(train_loader._size / args.batch_size)
+    # val_dataprovider = DataIterator(val_loader)
     
     # model and optimizer
-    if "res" in args.arch:
-        model_name = "%s(num_classes=%d, group1x1=False, group3x3=False)" % (args.arch, args.num_classes)
-    elif "vgg" in args.arch or "dense" in args.arch:
-        model_name = "%s(num_classes=%d, groupable=False)" % (args.arch, args.num_classes)
-    elif "shufflenet_v1" in args.arch:
-        model_name = "%s(num_classes=%d, groupable=False, group=8)" % (args.arch, args.num_classes)
+    model_name = "%s(num_classes=%d, groupable=False, model_size=%s, group=%d)" % \
+                 (args.arch, args.num_classes, args.model_size, args.group)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
         logger.info("Model details:")
@@ -175,7 +183,7 @@ def main():
         model = BN_convert_float(model.half())
     model = DDP(model, delay_allreduce=False)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.wd)
+    optimizer = torch.optim.SGD(get_parameters(model), lr=args.lr, momentum=args.momentum, weight_decay=args.wd)
     if args.local_rank == 0:
         logger.info("Optimizer details:")
         logger.info(optimizer)
@@ -191,47 +199,66 @@ def main():
         checkpoint = torch.load(args.resume, map_location=torch.device('cpu'))
         model.load_state_dict(checkpoint['state_dict'], strict=False)
         optimizer.load_state_dict(checkpoint['optimizer'])
-        args.start_epoch = checkpoint['epoch']
+        args.start_iter = checkpoint['iter']
         if args.local_rank == 0: 
             best_acc1 = checkpoint['best_acc1']
-            logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))    
+            logger.info("=> loaded checkpoint '{}' (iter {})".format(args.resume, checkpoint['iter']))    
     else:
-        args.start_epoch = 0
+        args.start_iter = 0
         if args.local_rank == 0: best_acc1 = 0    
     
-    scheduler = CosAnnealingLR(loader_len=train_loader_len, epochs=args.epochs,
-                               lr_max=args.lr, warmup_epochs=args.warmup,
-                               last_epoch=args.start_epoch-1)
+    scheduler = LinearLR(total_iters=args.total_iters, lr_max=args.lr, last_iter=args.start_iter-1)
     
     flops, params = profile(model.module, inputs=(torch.randn(1, 3, 224, 224).cuda(),), verbose=False)
     if args.local_rank == 0:
         logger.info("Baseline model: %.3e FLOPs, %.3e params" % (flops, params))
 
-    for epoch in range(args.start_epoch, args.epochs):
-        # train and evaluate
-        loss = train(train_loader, model, optimizer, scheduler, epoch)
-        acc1, acc5 = validate(val_loader, model)
+    all_iters = args.start_iter
+    while all_iters < args.total_iters:
+        loss, all_iters = train(train_dataprovider, model, optimizer, scheduler, bn_process=False, all_iters=all_iters)
+        acc1, acc5 = validate(val_loader, model, all_iters=all_iters)
         
         if args.local_rank == 0:
             # remember best prec@1 and save checkpoint
             is_best = acc1 > best_acc1
             if is_best:
                 best_acc1 = acc1
-    
-            tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
-            tfboard_writer.add_scalar('train/acc1-epoch', acc1, epoch)
-            tfboard_writer.add_scalar('train/acc5-epoch', acc5, epoch)
-            logger.info("Best acc1=%.5f" % best_acc1)
-
+                
             # save checkpoint
             save_checkpoint({
-                'epoch': epoch + 1,
+                'iter': all_iters + 1,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict()
                 }, is_best, path=args.tmp, filename="checkpoint.pth")
+            # log info into tfboard
+            tfboard_writer.add_scalar('train/loss-iter', loss, all_iters)
+            tfboard_writer.add_scalar('train/acc1-iter', acc1, all_iters)
+            tfboard_writer.add_scalar('train/acc5-iter', acc5, all_iters)
+            logger.info("Best acc1=%.5f" % best_acc1)
+    
+    loss, _ = train(train_dataprovider, model, optimizer, scheduler, bn_process=False, all_iters=all_iters)
+    acc1, acc5 = validate(val_loader, model, all_iters=all_iters)
+    
+    if args.local_rank == 0:
+        # remember best prec@1 and save checkpoint
+        is_best = acc1 > best_acc1
+        if is_best:
+            best_acc1 = acc1
+    # save checkpoint
+    save_checkpoint({
+        'iter': all_iters + 1,
+        'state_dict': model.state_dict(),
+        'best_acc1': best_acc1,
+        'optimizer' : optimizer.state_dict()
+        }, is_best, path=args.tmp, filename="checkpoint-final.pth")
+        
+def adjust_bn_momentum(model, iters):
+    for m in model.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.momentum = 1 / iters
 
-def train(train_loader, model, optimizer, scheduler, epoch):
+def train(train_dataprovider, model, optimizer, scheduler, bn_process=False, all_iters=None):
     if args.local_rank == 0:
         batch_time = AverageMeter()
         data_time = AverageMeter()
@@ -239,20 +266,24 @@ def train(train_loader, model, optimizer, scheduler, epoch):
         top1 = AverageMeter()
         top5 = AverageMeter()
 
-    train_loader_len = int(np.ceil(train_loader._size/args.batch_size))
     # switch to train mode
     model.train()
     
     if args.local_rank == 0:
         end = time.time()
-    for i, data in enumerate(train_loader):
+    curr_iters = int(train_dataprovider.dataloader._size/args.batch_size) if bn_process else args.val_freq
+    for iters in enumerate(curr_iters):
+        all_iters += 1
         # compute and adjust lr
         lr = scheduler.step()
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         
-        target = data[0]["label"].squeeze().cuda().long()
-        data = data[0]["data"]
+        # optionally adjust BN momentum
+        if bn_process:
+            adjust_bn_momentum(model, iters+1)
+
+        data, target = train_dataprovider.next()
         if args.fp16:
             data = data.half()
 
@@ -261,7 +292,7 @@ def train(train_loader, model, optimizer, scheduler, epoch):
             data_time.update(time.time() - end)
         
         output = model(data)
-        loss = criterion(output, target)
+        loss = criterion_smooth(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         reduced_loss = reduce_tensor(loss)
@@ -285,26 +316,24 @@ def train(train_loader, model, optimizer, scheduler, epoch):
         # measure elapsed time
         if args.local_rank == 0:
             batch_time.update(time.time() - end)
-            lr = optimizer.param_groups[0]["lr"]
         
-        if i % args.print_freq == 0 and args.local_rank == 0:
-            tfboard_writer.add_scalar("train/iter-lr", lr, epoch*train_loader_len+i)
-            logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+        if all_iters % args.print_freq == 0 and args.local_rank == 0:
+            tfboard_writer.add_scalar("train/iter-lr", lr, all_iters)
+            logger.info('It[{0}/{1}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                         'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
                         'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E}' \
-                        .format(epoch, args.epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
+                        .format(all_iters, args.total_iters, batch_time=batch_time, data_time=data_time,
                                 loss=losses, top1=top1, top5=top5, lr=lr))
         
         if args.local_rank == 0:
             end = time.time()
         
-    train_loader.reset()
     loss = torch.tensor([losses.avg]).cuda() if args.local_rank == 0 else torch.tensor([0.]).cuda()
     dist.broadcast(loss, 0)
-    return loss.cpu().item()
+    return loss.cpu().item(), all_iters
 
 @torch.no_grad()
-def validate(val_loader, model):
+def validate(val_loader, model, all_iters=None):
     losses = AverageMeter()
     if args.local_rank == 0:
         batch_time = AverageMeter()
@@ -313,8 +342,6 @@ def validate(val_loader, model):
     # switch to evaluate mode
     model.eval()
     if args.local_rank == 0:
-        val_loader_len = int(np.ceil(val_loader._size/50))
-        
         end = time.time()
     for i, data in enumerate(val_loader):
         target = data[0]["label"].squeeze().cuda().long()
@@ -323,7 +350,7 @@ def validate(val_loader, model):
             data = data.half()
         # compute output
         output = model(data)
-        loss = criterion(output, target)
+        loss = criterion_smooth(output, target)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -344,12 +371,13 @@ def validate(val_loader, model):
             end = time.time()
 
             if i % args.print_freq == 0:
-                logger.info('Test: [{0}/{1}] Test Loss {loss.val:.3f} (avg={loss.avg:.3f}) Prec@1 {top1.val:.3f} '
+                logger.info('Test Loss {loss.val:.3f} (avg={loss.avg:.3f}) Prec@1 {top1.val:.3f} '
                             '(avg={top1.avg:.3f}) Prec@5 {top5.val:.3f} (avg={top5.avg:.3f})' \
-                            .format(i, val_loader_len, loss=losses, top1=top1, top5=top5))
+                            .format(loss=losses, top1=top1, top5=top5))
 
     if args.local_rank == 0:
-        logger.info(' * Prec@1 {top1.avg:.5f} Prec@5 {top5.avg:.5f}'.format(top1=top1, top5=top5))
+        logger.info('Test: [{0}/{1}] Prec@1 {top1.avg:.5f} Prec@5 {top5.avg:.5f}' \
+                    .format(all_iters, args.total_iters, top1=top1, top5=top5))
 
     val_loader.reset()
     top1 = torch.tensor([top1.avg]).cuda() if args.local_rank == 0 else torch.tensor([0.]).cuda()
@@ -364,5 +392,6 @@ def reduce_tensor(tensor):
     rt /= args.world_size
     return rt
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+

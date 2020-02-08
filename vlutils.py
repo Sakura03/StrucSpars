@@ -139,21 +139,16 @@ class CosAnnealingLR(object):
         return self.lr
 
 class LinearLR(object):
-    def __init__(self, loader_len, epochs, lr_max, warmup_epochs=0, last_epoch=-1):
-        max_iters = loader_len * epochs
-        warmup_iters = loader_len * warmup_epochs
+    def __init__(self, total_iters, lr_max, last_iter=-1):
         assert lr_max >= 0
-        assert warmup_iters >= 0
-        assert max_iters >= 0 and max_iters >= warmup_iters
+        assert total_iters >= 0
 
-        self.max_iters = max_iters
+        self.total_iters = total_iters
         self.lr_max = lr_max
-        self.warmup_iters = warmup_iters
-        self.last_epoch = last_epoch
-
-        assert self.last_epoch >= -1
-        self.iter_counter = (self.last_epoch+1) * loader_len
-        self.lr = 0 
+        self.last_iter = last_iter
+        
+        assert self.last_iter >= -1
+        self.iter_counter = self.last_iter + 1
     
     def restart(self, lr_max=None):
         if lr_max:
@@ -162,10 +157,7 @@ class LinearLR(object):
 
     def step(self):
         self.iter_counter += 1
-        if self.warmup_iters > 0 and self.iter_counter <= self.warmup_iters:
-            self.lr = float(self.iter_counter / self.warmup_iters) * self.lr_max
-        else:
-            self.lr = (1. - (self.iter_counter - self.warmup_iters) / (self.max_iters - self.warmup_iters)) * self.lr_max
+        self.lr = max((1. - self.iter_counter / self.total_iters) * self.lr_max, 0.)
         return self.lr
 
 class MultiStepLR(object):

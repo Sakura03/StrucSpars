@@ -1,4 +1,5 @@
 import time, torch
+import torch.nn as nn
 import torch.distributed as dist
 from model import GroupableConv2d, get_penalty_matrix
 
@@ -159,3 +160,44 @@ def repermute_matrices(model, shuffle_type='learned'):
                 m.Q = torch.arange(len(m.Q)).reshape(groups, -1).t().reshape(-1).to(m.Q.device)
             m.mask_group()
 
+class DataIterator(object):
+    def __init__(self, dataloader):
+        self.dataloader = dataloader
+        self.iterator = enumerate(self.dataloader)
+
+    def next(self):
+        try:
+            _, data = next(self.iterator)
+        except:
+            self.dataloader.reset()
+            self.iterator = enumerate(self.dataloader)
+            _, data = next(self.iterator)
+        return data[0]["data"], data[0]["label"].squeeze().cuda().long()
+
+def get_parameters(model):
+	group_no_weight_decay = []
+	group_weight_decay = []
+	for pname, p in model.named_parameters():
+		if pname.find('weight') >= 0 and len(p.size()) > 1:
+			print('with weight decay:', pname, p.size())
+			group_weight_decay.append(p)
+		else:
+			print('without weight decay:', pname, p.size())
+			group_no_weight_decay.append(p)
+	assert len(list(model.parameters())) == len(group_weight_decay) + len(group_no_weight_decay)
+	groups = [dict(params=group_weight_decay), dict(params=group_no_weight_decay, weight_decay=0.)]
+	return groups
+
+class CrossEntropyLabelSmooth(nn.Module):
+	def __init__(self, num_classes, epsilon):
+		super(CrossEntropyLabelSmooth, self).__init__()
+		self.num_classes = num_classes
+		self.epsilon = epsilon
+		self.logsoftmax = nn.LogSoftmax(dim=1)
+
+	def forward(self, inputs, targets):
+		log_probs = self.logsoftmax(inputs)
+		targets = torch.zeros_like(log_probs).scatter_(1, targets.unsqueeze(1), 1)
+		targets = (1 - self.epsilon) * targets + self.epsilon / self.num_classes
+		loss = (-targets * log_probs).mean(0).sum()
+		return loss

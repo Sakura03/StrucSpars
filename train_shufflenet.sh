@@ -1,10 +1,10 @@
-python -m torch.distributed.launch --nproc_per_node=3 train_imagenet.py \
+python -m torch.distributed.launch --nproc_per_node=3 train_shufflenet.py \
                                    -a "shufflenet_v1" \
                                    --group "3" \
                                    --model-size "1.0x" \
-                                   --data "/media/ssd/imagenet/rec" \
+                                   --data "/media/ssd0/ilsvrc12/rec" \
                                    --tmp "results/imagenet-shufflenet-v1-baseline" \
-                                   --batch-size "341" \
+                                   --batch-size "256" \
                                    --wd "4e-5" \
                                    --total-iters "300000" \
                                    --lr "0.5" \

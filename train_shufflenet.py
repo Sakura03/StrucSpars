@@ -161,7 +161,6 @@ def main():
     pipe.build()
     train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
     train_dataprovider = DataIterator(train_loader)
-    print(int(train_dataprovider.dataloader._size/args.batch_size)) ###TODO: tmp
 
     pipe = HybridValPipe(batch_size=50, num_threads=args.workers,
                          device_id=args.local_rank, data_dir=valdir,
@@ -171,7 +170,7 @@ def main():
     # val_dataprovider = DataIterator(val_loader)
     
     # model and optimizer
-    model_name = "%s(num_classes=%d, groupable=False, model_size=%s, group=%d)" % \
+    model_name = "%s(num_classes=%d, groupable=False, model_size='%s', group=%d)" % \
                  (args.arch, args.num_classes, args.model_size, args.group)
     model = eval(model_name).cuda()
     if args.local_rank == 0:
@@ -270,7 +269,7 @@ def train(train_dataprovider, model, optimizer, scheduler, bn_process=False, all
     if args.local_rank == 0:
         end = time.time()
     curr_iters = int(train_dataprovider.dataloader._size/args.batch_size) if bn_process else args.val_freq
-    for iters in enumerate(curr_iters):
+    for iters in range(curr_iters):
         all_iters += 1
         # compute and adjust lr
         lr = scheduler.step()

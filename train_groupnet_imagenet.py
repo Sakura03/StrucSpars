@@ -57,6 +57,7 @@ parser.add_argument('--sparsity', type=float, default=1e-5, help='sparsity regul
 parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
 parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
 parser.add_argument('--finetune-lr', type=int, default=1e-1, help="finetune lr")
+parser.add_argument('--finetune-cosine', action="store_true", help="use cosine learning rate annealing for finetune")
 parser.add_argument('--finetune-epochs', type=int, default=120, help="finetune epochs")
 parser.add_argument('--finetune-weight-decay', type=float, default=1e-4, help="finetune weight decay")
 parser.add_argument('--init-iters', type=int, default=50, help='Initial iterations')
@@ -425,8 +426,13 @@ def main():
     # finetune
     optimizer_finetune = torch.optim.SGD(model.parameters(), lr=args.finetune_lr, momentum=args.momentum, weight_decay=args.finetune_weight_decay)
 
-    scheduler_finetune = CosAnnealingLR(loader_len=train_loader_len, epochs=args.finetune_epochs,
-                                        lr_max=args.finetune_lr, warmup_epochs=args.warmup)
+    if args.finetune_cosine:
+        scheduler_finetune = CosAnnealingLR(loader_len=train_loader_len, epochs=args.finetune_epochs,
+                                            lr_max=args.finetune_lr, warmup_epochs=args.warmup)
+    else:
+        scheduler_finetune = MultiStepLR(loader_len=train_loader_len, milestones=[30, 60, 90],
+                                         gamma=args.gamma, warmup_epochs=0)
+
     if args.finetune_fp16:
         optimizer_finetune = FP16_Optimizer(optimizer_finetune, static_loss_scale=args.static_loss_scale,
                                             dynamic_loss_scale=args.dynamic_loss_scale, verbose=False)

@@ -1,7 +1,7 @@
-python -m torch.distributed.launch --nproc_per_node=4 train_groupnet_imagenet.py \
-                                   -a "densenet201" \
-                                   --data "/home/andrew/Datasets/ilsvrc12-rec" \
-                                   --tmp "results/imagenet-densenet201-delta-lambda2e-6-thres0.1-power0.5-warmup5-wd0-percent0.38-adjust-lambda" \
+CUDA_VISIBLE_DEVICES='4,5,6,7' python3 -m torch.distributed.launch --nproc_per_node=4 --master_port=4859 train_groupnet_imagenet.py \
+                                   -a "resnet50" \
+                                   --data "/media/ssd/imagenet/rec" \
+                                   --tmp "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-warmup5-wd0-percent0.65-adjust-lambda-steplr-finetune" \
                                    --batch-size "64" \
                                    --use-rec \
                                    --dali-cpu \
@@ -14,7 +14,8 @@ python -m torch.distributed.launch --nproc_per_node=4 train_groupnet_imagenet.py
                                    --sparse-thres "0.1" \
                                    --power "0.5" \
                                    --warmup "5" \
-                                   --percent "0.38" \
+                                   --percent "0.65" \
+				   --finetune-epochs "110" \
                                    --init-iters "20" \
                                    --epoch-iters "5" \
                                    --iter-iters "1"

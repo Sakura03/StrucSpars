@@ -519,8 +519,8 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             impose_group_lasso(model, l1lambda)
         optimizer.step()
         
-        # torch.cuda.synchronize()
         # measure elapsed time
+        torch.cuda.synchronize()
         if args.local_rank == 0:
             batch_time.update(time.time() - end)
             lr = optimizer.param_groups[0]["lr"]

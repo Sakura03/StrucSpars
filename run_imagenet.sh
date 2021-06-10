@@ -1,21 +1,10 @@
-CUDA_VISIBLE_DEVICES='0,1,2,3' python3 -m torch.distributed.launch --nproc_per_node=4 --master_port=7788 train_groupnet_imagenet.py \
-                                   -a "resnet50" \
-                                   --data "/media/ssd/imagenet/rec" \
-                                   --tmp "results/imagenet-resnet50-delta-lambda2e-6-thres0.1-power0.5-group1x1-warmup5-wd0-percent0.35-adjust-lambda-steplr-finetune" \
-                                   --batch-size "64" \
-                                   --use-rec \
-                                   --epochs "60" \
-                                   --milestones "[]" \
-                                   --wd "0." \
-                                   --sparsity "2e-6" \
-                                   --delta-lambda "2e-6" \
-                                   --adjust-lambda \
-				   --group1x1 \
-                                   --sparse-thres "0.1" \
-                                   --power "0.5" \
-                                   --warmup "5" \
-                                   --percent "0.35" \
-				   --finetune-epochs "110" \
-                                   --init-iters "20" \
-                                   --epoch-iters "5" \
-                                   --iter-iters "1"
+CUDA_VISIBLE_DEVICES='0,1,2,3' python3 -m torch.distributed.launch --nproc_per_node=4 --master_port=2345 train_groupnet_imagenet.py \
+                                -a "resnet50" \
+                                --data "/path/to/rec"
+                                --save-path "results/imagenet-resnet50-percent0.35" \
+                                --batch-size "64" \
+                                --epochs "60" \
+                                --wd "0." \
+                                --warmup "5" \
+                                --percent "0.35" \
+                                --finetune-epochs "120"

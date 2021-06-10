@@ -1,11 +1,11 @@
 import torch, os, argparse, time, warnings
 import numpy as np
-from PIL import Image
 from os.path import join, isfile
-from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, MultiStepLR, CosAnnealingLR
-from model import *
-from utils import get_penalties, get_factors, get_sparsity, get_sparsity_loss, get_threshold, synchronize_model
-from utils import set_group_levels, update_permutation_matrix, mask_group, real_group, impose_group_lasso
+from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
+import model
+from utils import get_struc_reg_mat, get_perm_weight_norm, get_sparsity, get_threshold, synchronize_model, \
+                  set_group_levels, update_permutation_matrix, mask_group, real_group, impose_group_lasso
+import torch.nn.functional as F
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
 # DALI data reader
@@ -15,8 +15,7 @@ import nvidia.dali.types as types
 from nvidia.dali.plugin.pytorch import DALIClassificationIterator
 # distributed
 import torch.distributed as dist
-from apex.parallel import DistributedDataParallel as DDP
-from apex.fp16_utils import FP16_Optimizer, BN_convert_float
+from torch.nn.parallel import DistributedDataParallel as DDP
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 warnings.simplefilter('error')
 
@@ -25,60 +24,42 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='man
 parser.add_argument('--print-freq', default=50, type=int, metavar='N', help='print frequency (default: 50)')
 parser.add_argument('-a', '--arch', default='resnet50', type=str, metavar='STR', help='model architecture')
 parser.add_argument('--data', metavar='DIR', default="./data", help='path to dataset')
-parser.add_argument('--num-classes', default=1000, type=int, metavar='N', help='Number of classes')
+parser.add_argument('--num-classes', default=1000, type=int, metavar='N', help='number of classes')
 parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers')
-parser.add_argument('--batch-size', default=64, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to the latest checkpoint')
 parser.add_argument('--imsize', default=256, type=int, metavar='N', help='image resize size')
 parser.add_argument('--imcrop', default=224, type=int, metavar='N', help='image crop size')
-parser.add_argument('--epochs', default=110, type=int, metavar='N', help='number of total epochs to run')
+parser.add_argument('--save-path', default="results/tmp", type=str, help='path to save results')
+# train
+parser.add_argument('--batch-size', default=64, type=int, metavar='N', help='mini-batch size per GPU')
+parser.add_argument('--epochs', default=60, type=int, metavar='N', help='number of total epochs to run')
 parser.add_argument('--warmup', default=5, type=int, help="warmup epochs (small lr and do not impose sparsity)")
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float, metavar='LR', help='initial learning rate')
-parser.add_argument('--gamma', default=0.1, type=float, metavar='GM', help='decrease learning rate by gamma')
-parser.add_argument('--milestones', default=[30, 60, 90], type=eval, help='milestones for scheduling lr')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
-parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float, metavar='WD', help='weight decay')
-parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to the latest checkpoint')
-parser.add_argument('--tmp', default="results/tmp", type=str, help='tmp folder')
-# FP16
-parser.add_argument('--fp16', action='store_true', help='Train the model with precision float16')
-parser.add_argument('--finetune-fp16', action='store_true', help="Train the model with precision float16")
-parser.add_argument('--static-loss-scale', type=float, default=1, help='Static loss scale, positive power of 2 values can improve fp16 convergence.')
-parser.add_argument('--dynamic-loss-scale', action='store_true', help='Use dynamic loss scaling.  If supplied, this argument supersedes --static-loss-scale.')
+parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='SGD momentum')
+parser.add_argument('--weight-decay', '--wd', default=0.0, type=float, metavar='WD', help='weight decay')
+# finetune
+parser.add_argument('--ft-lr', default=0.1, type=int, help="initial learning rate in finetune stage")
+parser.add_argument('--ft-epochs', default=120, type=int, help="number of total epochs to finetune")
+parser.add_argument('--ft-warmup', default=5, type=int, help="warmup epochs in finetune stage")
+parser.add_argument('--ft-wd', default=1e-4, type=float, help="weight decay in finetune stage")
+# group
+parser.add_argument('--delta-lambda', default=2e-6, type=float, help='L1 reg coefficient gain in each epoch')
+parser.add_argument('--sparse-thres', default=0.1, type=float, help='sparse threshold (p)')
+parser.add_argument('--decay-factor', default=0.5, type=float, help='decay factor in structured regularization matrix')
+parser.add_argument('--prune-percent', default=0.5, type=float, help='parameter percent to prune')
 # distributed
 parser.add_argument("--local_rank", default=0, type=int)
-parser.add_argument('--dali-cpu', action='store_true', help='Runs CPU based version of DALI pipeline.')
-parser.add_argument('--use-rec', action="store_true", help='Use .rec data file')
-
-parser.add_argument('--fix-lr', action="store_true", help='set true to fix learning rate')
-parser.add_argument('--no-finetune', action="store_true", help='set true to disable finetuning')
-parser.add_argument('--group1x1', action="store_true", help='set true to group conv1x1')
-parser.add_argument('--adjust-lambda', action="store_true", help='set true to automatically adjust l1lambda')
-parser.add_argument('--sparsity', type=float, default=1e-5, help='sparsity regularization')
-parser.add_argument('--delta-lambda', type=float, default=1e-5, help='delta lambda')
-parser.add_argument('--sparse-thres', type=float, default=0.1, help='sparse threshold')
-parser.add_argument('--finetune-lr', type=int, default=1e-1, help="finetune lr")
-parser.add_argument('--finetune-cosine', action="store_true", help="use cosine learning rate annealing for finetune")
-parser.add_argument('--finetune-epochs', type=int, default=120, help="finetune epochs")
-parser.add_argument('--finetune-weight-decay', type=float, default=1e-4, help="finetune weight decay")
-parser.add_argument('--init-iters', type=int, default=50, help='Initial iterations')
-parser.add_argument('--epoch-iters', type=int, default=20, help='Iterations for each epoch')
-parser.add_argument('--iter-iters', type=int, default=5, help='Iterations for each 500 training iterations')
-parser.add_argument('--power', type=float, default=0.5, help='Decay rate in the penalty matrix')
-parser.add_argument('--percent', type=float, default=0.5, help='remaining parameter percent')
+parser.add_argument('--dali-cpu', action='store_true', help='run CPU-based version of DALI pipeline.')
 args = parser.parse_args()
+
 
 # DALI pipelines
 class HybridTrainPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, dali_cpu=False):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        if args.use_rec:
-            # MXnet rec reader
-            self.input = ops.MXNetReader(path=join(data_dir, "train.rec"), index_path=join(data_dir, "train.idx"),
-                                        random_shuffle=True, shard_id=args.local_rank, num_shards=args.world_size)
-        else:
-            # image reader
-            self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
-        #let user decide which pipeline works him bets for RN version he runs
+        # MXnet rec reader
+        self.input = ops.MXNetReader(path=join(data_dir, "train.rec"), index_path=join(data_dir, "train.idx"),
+                                    random_shuffle=True, shard_id=args.local_rank, num_shards=args.world_size)
         dali_device = 'cpu' if dali_cpu else 'gpu'
         decoder_device = 'cpu' if dali_cpu else 'mixed'
         # This padding sets the size of the internal nvJPEG buffers to be able to handle all images from full-sized ImageNet
@@ -110,14 +91,12 @@ class HybridTrainPipe(Pipeline):
         output = self.cmnp(images.gpu(), mirror=rng)
         return [output, self.labels]
 
+
 class HybridValPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, size):
         super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        if args.use_rec:
-            self.input = ops.MXNetReader(path=join(data_dir, "val.rec"), index_path=join(data_dir, "val.idx"),
+        self.input = ops.MXNetReader(path=join(data_dir, "val.rec"), index_path=join(data_dir, "val.idx"),
                                      random_shuffle=False, shard_id=args.local_rank, num_shards=args.world_size)
-        else:
-            self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
         self.decode = ops.ImageDecoder(device="mixed", output_type=types.RGB)
         self.res = ops.Resize(device="gpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
         self.cmnp = ops.CropMirrorNormalize(device="gpu",
@@ -127,6 +106,7 @@ class HybridValPipe(Pipeline):
                                             image_type=types.RGB,
                                             mean=[0.485 * 255,0.456 * 255,0.406 * 255],
                                             std=[0.229 * 255,0.224 * 255,0.225 * 255])
+
     def define_graph(self):
         self.jpegs, self.labels = self.input(name="Reader")
         images = self.decode(self.jpegs)
@@ -134,479 +114,385 @@ class HybridValPipe(Pipeline):
         output = self.cmnp(images)
         return [output, self.labels]  
 
+
 torch.backends.cudnn.benchmark = True
-os.makedirs(args.tmp, exist_ok=True)
-
-# loss function
-criterion = torch.nn.CrossEntropyLoss()
-custom_ops = {GroupableConv2d: count_hooks.count_convNd}
-
+os.makedirs(args.save_path, exist_ok=True)
 if args.local_rank == 0:
-    tfboard_writer = SummaryWriter(log_dir=args.tmp)
-    logger = Logger(join(args.tmp, "log.txt"))
+    tfboard_writer = SummaryWriter(log_dir=args.save_path)
+    logger = Logger(join(args.save_path, "log.txt"))
 
-args.distributed = False
-if 'WORLD_SIZE' in os.environ:
-    args.distributed = int(os.environ['WORLD_SIZE']) > 1
+# Customized operation for profiling
+custom_ops = {model.GroupableConv2d: count_hooks.count_convNd}
 
-if args.fp16 or args.finetune_fp16:
-    assert torch.backends.cudnn.enabled, "fp16 mode requires cudnn backend to be enabled."
+# Set device
+args.gpu = args.local_rank % torch.cuda.device_count()
+torch.cuda.device(args.gpu)
+local_device = torch.device("cuda", args.gpu)
+
 
 def main():
     if args.local_rank == 0:
         logger.info(args)
 
-    if args.distributed:
-        args.gpu = args.local_rank % torch.cuda.device_count()
-        torch.cuda.set_device(args.gpu)
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
-        args.world_size = torch.distributed.get_world_size()
-        
-    if args.use_rec:
-        traindir = args.data
-        valdir = args.data
-    else:
-        traindir = join(args.data, "train")
-        valdir = join(args.data, "val")
-    
+    # Pytorch distributed setup
+    dist.init_process_group(backend='nccl', init_method='env://')
+    args.world_size = dist.get_world_size()
+
+    # Build DALI dataloader
     pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=args.workers,
-                           device_id=args.local_rank, data_dir=traindir, 
+                           device_id=args.local_rank, data_dir=args.data, 
                            crop=args.imcrop, dali_cpu=args.dali_cpu)
     pipe.build()
     train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
 
     pipe = HybridValPipe(batch_size=50, num_threads=args.workers,
-                         device_id=args.local_rank, data_dir=valdir,
+                         device_id=args.local_rank, data_dir=args.data,
                          crop=args.imcrop, size=args.imsize)
     pipe.build()
     val_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
     train_loader_len = int(train_loader._size / args.batch_size)
-    
-    # model and optimizer
-    if "res" in args.arch:
-        group1x1 = "True" if args.group1x1 else "False"
-        model_name = "%s(num_classes=%d, group1x1=%s, power=%f)" % (args.arch, args.num_classes, group1x1, args.power)
-    elif "vgg" in args.arch or "dense" in args.arch or "shuffle" in args.arch:
-        model_name = "%s(num_classes=%d, groupable=True, power=%f)" % (args.arch, args.num_classes, args.power)
-    model = eval(model_name).cuda()
+
+    # Define model and optimizer
+    model_name = "model.%s(num_classes=%d, power=%f)" % (args.arch, args.num_classes, args.decay_factor)
+    model = eval(model_name).to(local_device)
     if args.local_rank == 0:
         logger.info("Model details:")
         logger.info(model)
-        flops, params = profile(model, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
+        flops, params = profile(model, inputs=(torch.randn(1, 3, 224, 224).to(local_device),), custom_ops=custom_ops, verbose=False)
         tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
         tfboard_writer.add_scalar("train/Params", params, global_step=-1)
-
-        for name, m in model.named_modules():
-            if isinstance(m, GroupableConv2d):
-                os.makedirs(join(args.tmp, "imgs", name), exist_ok=True)
-
-    if args.fp16:
-        model = BN_convert_float(model.half())
-    model = DDP(model, delay_allreduce=False)
-
+    model = DDP(model, device_ids=[args.local_rank])
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     if args.local_rank == 0:
         logger.info("Optimizer details:")
         logger.info(optimizer)
-    if args.fp16:
-        optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.static_loss_scale,
-                                   dynamic_loss_scale=args.dynamic_loss_scale, verbose=False)
-    
+
+    # Save initial weights
     if args.local_rank == 0:
-        # records
-        best_acc1 = 0
-    
-        # save initial weights
         save_checkpoint({
                 'epoch': -1,
                 'state_dict': model.state_dict(),
-                'best_acc1': -1,
-                }, is_best=False, path=args.tmp, filename="initial-weights.pth")
+                'best_acc1': 0.0,
+        }, is_best=False, path=args.save_path, filename="initial-weights.pth")
 
-    # optionally resume from a checkpoint
+    # Optionally resume from a checkpoint
     if args.resume:
-        if isfile(args.resume):
-            if args.local_rank == 0:
-                logger.info("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location=torch.device('cpu'))
-            args.start_epoch = checkpoint['epoch']
-            best_acc1 = checkpoint['best_acc1']
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if args.local_rank == 0:
-                logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
-        else:
-            if args.local_rank == 0:
-                logger.info("=> no checkpoint found at '{}'".format(args.resume))
-
-    scheduler = None if args.fix_lr else \
-                MultiStepLR(loader_len=train_loader_len, milestones=args.milestones,
-                            gamma=args.gamma, warmup_epochs=args.warmup)
-    
-    if args.local_rank == 0:
-        # log initial factors and penalties
-        factors = get_factors(model.module)
-        penalties = get_penalties(model.module)
-        for k in factors.keys():
-            f = factors[k] / (factors[k].max()+1e-8)
-            p = penalties[k]
-            canvas = torch.cat((f, torch.ones(f.size(0), f.size(1)//4).to(device=f.device), p.to(device=f.device)), dim=1)
-            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-2)
-            
-            img = Image.fromarray(canvas.mul(255.).cpu().numpy()).convert('L')
-            img.save(join(args.tmp, "imgs", k, "before-permutation.png"))
-
-        # initially update permutation matrices P and Q
-        update_permutation_matrix(model, iters=args.init_iters)
-    synchronize_model(model)
-        
-    if args.local_rank == 0:
-        # log factors and penalties after permutation
-        factors = get_factors(model.module)
-        penalties = get_penalties(model.module)
-        if args.adjust_lambda:
-            last_sparsity = get_sparsity(factors, thres=args.sparse_thres)
-        for k in factors.keys():
-            f = factors[k] / (factors[k].max()+1e-8)
-            p = penalties[k]
-            canvas = torch.cat((f, torch.ones(f.size(0), f.size(1)//4).to(device=f.device), p), dim=1)
-            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-1)
-            
-            img = Image.fromarray(canvas.mul(255.).cpu().numpy()).convert('L')
-            img.save(join(args.tmp, "imgs", k, "after-permutation.png"))
-
-    for epoch in range(args.start_epoch, args.epochs):
-        # train and evaluate
-        loss = train(train_loader, model, optimizer, scheduler, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
-        acc1, acc5 = validate(val_loader, model)
-        
+        assert isfile(args.resume), "=> no checkpoint found at '{}'".format(args.resume)
         if args.local_rank == 0:
-            # update permutation matrices P and Q
-            update_permutation_matrix(model, iters=args.epoch_iters)
-            
-            # compute the regularity
-            sloss = get_sparsity_loss(model, enable_grad=False)
+            logger.info("=> loading checkpoint '{}'".format(args.resume))
+        checkpoint = torch.load(args.resume, map_location=torch.device('cpu'))
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        args.start_epoch = checkpoint['epoch']
+        if args.local_rank == 0:
+            best_acc1 = checkpoint['best_acc1']
+            logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
+    else:
+        args.start_epoch = 0
+        if args.local_rank == 0: best_acc1 = 0
 
-            # calculate sparsity, FLOPs, and params
-            m = eval(model_name).cuda()
-            factors = get_factors(model.module)
-            penalties = get_penalties(model.module)
-            group_levels = mask_group(m, factors, args.sparse_thres, logger)
+    if args.local_rank == 0:
+        # Log initial group info
+        weight_norm = get_perm_weight_norm(model.module)
+        struc_reg = get_struc_reg_mat(model.module)
+        for k in weight_norm.keys():
+            wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
+            sr = struc_reg[k]
+            canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr.to(device=wn.device)), dim=1)
+            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-2)
+        # Initially update permutation matrices P and Q
+        update_permutation_matrix(model, iters=50)
+
+    # Synchronize grouping state (P/Q/P_inv/Q_inv/group_level/struc_reg_mat)
+    synchronize_model(model)
+
+    if args.local_rank == 0:
+        # Log group info after initial permutation
+        weight_norm = get_perm_weight_norm(model.module)
+        struc_reg = get_struc_reg_mat(model.module)
+        last_sparsity = get_sparsity(weight_norm, thres=args.sparse_thres)
+        for k in weight_norm.keys():
+            wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
+            sr = struc_reg[k]
+            canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr), dim=1)
+            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-1)
+
+    struc_reg_coeff = args.delta_lambda
+    for epoch in range(args.start_epoch, args.epochs):
+        # Train and evaluate
+        loss = train(train_loader, model, optimizer, None, epoch, l1lambda=struc_reg_coeff if epoch >= args.warmup else 0.0)
+        acc1, acc5 = validate(val_loader, model)
+
+        if args.local_rank == 0:
+            # Update permutation matrices P and Q
+            update_permutation_matrix(model, iters=20)
+
+            # Calculate current sparsity, FLOPs, and params
+            weight_norm = get_perm_weight_norm(model.module)
+            model_sparsity = get_sparsity(weight_norm, thres=args.sparse_thres)
+            m = eval(model_name).to(local_device)
+            group_levels = mask_group(m, weight_norm, args.sparse_thres, logger)
             real_group(m)
-            set_group_levels(model.module, group_levels)
-            
-            model_sparsity = get_sparsity(factors, thres=args.sparse_thres)
-            flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
+            flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).to(local_device),), custom_ops=custom_ops, verbose=False)
             del m
             torch.cuda.empty_cache()
             logger.info("Sparsity %.6f, %.3e FLOPs, %.3e params" % (model_sparsity, flops, params))
 
-            # remember best prec@1 and save checkpoint
-            is_best = acc1 > best_acc1
-            if is_best:
-                best_acc1 = acc1
+            # Set group levels and gei current sparsity
+            set_group_levels(model.module, group_levels)
 
-            # save checkpoint
+            # Remember best prec@1 and save checkpoint
+            is_best = acc1 > best_acc1
+            if is_best: best_acc1 = acc1
+
+            # Save checkpoint and log info
             save_checkpoint({
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
                     'best_acc1': best_acc1,
                     'optimizer' : optimizer.state_dict()
-                    }, is_best, path=args.tmp)
-            if (epoch+1) in args.milestones:
-                save_checkpoint({
-                        'epoch': epoch + 1,
-                        'arch': args.arch,
-                        'state_dict': model.state_dict(),
-                        'best_acc1': best_acc1,
-                        'optimizer': optimizer.state_dict(),
-                        }, is_best=False, path=args.tmp, filename="checkpoint-epoch%d.pth"%epoch)
+            }, is_best, path=args.save_path)
             logger.info("Best acc1=%.5f" % best_acc1)
-            
-            # optionally adjust l1lambda
-            if args.adjust_lambda:
-                target_sparsity = args.percent
-                sparsity_gain = (model_sparsity - last_sparsity)
-                expected_sparsity_gain = (target_sparsity - model_sparsity) / (args.epochs - epoch)
-                if epoch >= args.warmup:
-                    # not sparse enough
-                    if model_sparsity < target_sparsity and sparsity_gain < expected_sparsity_gain:
-                        logger.info("Sparsity gain %f (expected %f), increasing the sparsity penalty." % (sparsity_gain, expected_sparsity_gain))
-                        args.sparsity += args.delta_lambda
-                    # over sparse
-                    elif model_sparsity >= target_sparsity:
-                        args.sparsity -= args.delta_lambda
-                    # minimal sparsity=0
-                    args.sparsity = max(args.sparsity, 0)
-                logger.info("Model sparsity=%f (last=%f, target=%f), args.sparsity=%f" % (model_sparsity, last_sparsity, target_sparsity, args.sparsity))
-                last_sparsity = model_sparsity
-        
-        # broadcast to other workers
-        synchronize_model(model)           
-        if args.adjust_lambda:
-            current_sparsity = torch.tensor([args.sparsity]).cuda()
-            dist.broadcast(current_sparsity, 0)
-            args.sparsity = current_sparsity.cpu().item()
-            del current_sparsity
-        
-        # add scalars and images to tensorboard
-        if args.local_rank == 0:
+
+            struc_reg = get_struc_reg_mat(model.module)
             tfboard_writer.add_scalar("train/FLOPs", flops, epoch)
             tfboard_writer.add_scalar("train/Params", params, epoch)
-            tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
-            tfboard_writer.add_scalar('train/sloss-epoch', sloss, epoch)
+            tfboard_writer.add_scalar('train/loss', loss, epoch)
             tfboard_writer.add_scalar('train/model-sparsity', model_sparsity, epoch)
-            tfboard_writer.add_scalar('train/sparse-penalty', args.sparsity, epoch)
-            tfboard_writer.add_scalar('test/acc1-epoch', acc1, epoch)
-            tfboard_writer.add_scalar('test/acc5-epoch', acc5, epoch)
-            
-            for k in factors.keys():
-                f = factors[k] / (factors[k].max()+1e-8)
-                p = penalties[k]
-                canvas = torch.cat((f, torch.ones(f.size(0), f.size(1)//4).to(device=f.device), p), dim=1)
+            tfboard_writer.add_scalar('train/L1-coefficient', struc_reg_coeff, epoch)
+            tfboard_writer.add_scalar('test/acc1', acc1, epoch)
+            tfboard_writer.add_scalar('test/acc5', acc5, epoch)
+            for k in weight_norm.keys():
+                wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
+                sr = struc_reg[k]
+                canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr), dim=1)
                 tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=epoch)
-                
-                img = Image.fromarray(canvas.mul(255.).cpu().numpy()).convert('L')
-                img.save(join(args.tmp, "imgs", k, "epoch%03d.png"%epoch))
 
-                tfboard_writer.add_scalar("details/%s"%k, group_levels[k], epoch)
-                tfboard_writer.add_scalar("details/%s"%k, group_levels[k], epoch)
+            # Adjust coefficient of L1 regularization
+            target_sparsity = args.prune_percent
+            sparsity_gain = model_sparsity - last_sparsity
+            expected_sparsity_gain = (target_sparsity - model_sparsity) / (args.epochs - epoch)
+            if epoch >= args.warmup:
+                # not sparse enough
+                if model_sparsity < target_sparsity and sparsity_gain < expected_sparsity_gain:
+                    logger.info("Sparsity gain %f (expected %f), increase reg coefficient by %.3e" % (sparsity_gain, expected_sparsity_gain, args.delta_lambda))
+                    struc_reg_coeff += args.delta_lambda
+                # over sparse
+                elif model_sparsity >= target_sparsity:
+                    struc_reg_coeff -= args.delta_lambda
+                struc_reg_coeff = max(struc_reg_coeff, 0)
+            logger.info("Model sparsity=%f (last=%f, target=%f), coefficient=%f" % (model_sparsity, last_sparsity, target_sparsity, struc_reg_coeff))
+            last_sparsity = model_sparsity
 
+        # Broadcast to other workers
+        synchronize_model(model)           
+        current_sparsity = torch.tensor([struc_reg_coeff]).to(local_device)
+        dist.broadcast(current_sparsity, 0)
+        struc_reg_coeff = current_sparsity.cpu().item()
+        del current_sparsity
+
+    # Evaluate before grouping
     if args.local_rank == 0:
-        logger.info("Training done, ALL results saved to %s." % args.tmp)
-
-        # evaluate before grouping
-        logger.info("evaluating before grouping...")
+        logger.info("Training done! Evaluating before grouping...")
     acc1, acc5 = validate(val_loader, model)
     if args.local_rank == 0:
-        tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-2)
-        tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-2)
+        tfboard_writer.add_scalar('finetune/acc1', acc1, global_step=-2)
+        tfboard_writer.add_scalar('finetune/acc5', acc5, global_step=-2)
 
-    # mask grouping
-    # thres = args.sparse_thres
+    # Calculate group threshold, final sparsity, FLOPs, and params
     with torch.no_grad():
-        thres = get_threshold(model.module, args.percent)
-    # calculate final sparsity, FLOPs, and params
-    factors = get_factors(model.module)
+        thres = get_threshold(model.module, args.prune_percent)
+    weight_norm = get_perm_weight_norm(model.module)
     if args.local_rank == 0:
-        m = eval(model_name).cuda()
-        group_levels = mask_group(m, factors, thres, logger=None)
+        m = eval(model_name).to(local_device)
+        group_levels = mask_group(m, weight_norm, thres, logger=None)
         real_group(m)
         set_group_levels(model.module, group_levels)
-   
-        model_sparsity = get_sparsity(factors, thres=thres)
-        flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).cuda(),), custom_ops=custom_ops, verbose=False)
+
+        model_sparsity = get_sparsity(weight_norm, thres=thres)
+        flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).to(local_device),), custom_ops=custom_ops, verbose=False)
         del m
         torch.cuda.empty_cache()
-        logger.info("Threshold %.3e, final sparsity %.6f, target sparsity %.6f, %.3e FLOPs, %.3e params" % (thres, model_sparsity, args.percent, flops, params))
+        logger.info("Threshold %.3e, final sparsity %.6f, target sparsity %.6f, %.3e FLOPs, %.3e params" % (thres, model_sparsity, args.prune_percent, flops, params))
 
-    group_levels = mask_group(model.module, factors, thres, logger=logger if args.local_rank == 0 else None)
-    torch.save(group_levels, join(args.tmp, "group_levels.pth"))
-
+    # Mask group
+    group_levels = mask_group(model.module, weight_norm, thres, logger=logger if args.local_rank == 0 else None)
     if args.local_rank == 0:
-        logger.info("evaluating after grouping...")
+        logger.info("Evaluating after mask grouping...")
     acc1, acc5 = validate(val_loader, model)
 
-    # real grouping
+    # Real group
     # real_group(model.module)
     # if args.local_rank == 0:
-    #     flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).cuda(),), custom_ops=custom_ops, verbose=False)
+    #     flops, params = profile(model.module, inputs=(torch.randn(1, 3, 32, 32).to(local_device),), custom_ops=custom_ops, verbose=False)
     #     logger.info("FLOPs %.3e, Params %.3e (after real grouping)" % (flops, params))
-
-    #     logger.info("evaluating after real grouping...")
+    #     logger.info("Evaluating after real grouping...")
     # acc1, acc5 = validate(val_loader, model)
 
     if args.local_rank == 0:
-        tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, global_step=-1)
-        tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, global_step=-1)
+        tfboard_writer.add_scalar('finetune/acc1', acc1, global_step=-1)
+        tfboard_writer.add_scalar('finetune/acc5', acc5, global_step=-1)
 
-    # shutdown when "args.no-finetune" is triggered
-    if args.no_finetune: return
-    
-    # finetune
-    optimizer_finetune = torch.optim.SGD(model.parameters(), lr=args.finetune_lr, momentum=args.momentum, weight_decay=args.finetune_weight_decay)
+    # Start finetune stage
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.ft_lr, momentum=args.momentum, weight_decay=args.ft_wd)
+    scheduler = CosAnnealingLR(loader_len=train_loader_len, epochs=args.ft_epochs, lr_max=args.ft_lr, warmup_epochs=args.ft_warmup)
 
-    if args.finetune_cosine:
-        scheduler_finetune = CosAnnealingLR(loader_len=train_loader_len, epochs=args.finetune_epochs,
-                                            lr_max=args.finetune_lr, warmup_epochs=args.warmup)
-    else:
-        scheduler_finetune = MultiStepLR(loader_len=train_loader_len, milestones=[30, 60, 90],
-                                         gamma=args.gamma, warmup_epochs=0)
-
-    if args.finetune_fp16:
-        optimizer_finetune = FP16_Optimizer(optimizer_finetune, static_loss_scale=args.static_loss_scale,
-                                            dynamic_loss_scale=args.dynamic_loss_scale, verbose=False)
-        if not args.fp16:
-            model = BN_convert_float(model.half())
-    if args.fp16 and (not args.finetune_fp16):
-        model.float()
-    
     if args.local_rank == 0:
         best_acc1 = 0    
-    for epoch in range(0, args.finetune_epochs):
-        # train and evaluate
-        loss = train(train_loader, model, optimizer_finetune, scheduler_finetune, epoch, finetune=True)
-        acc1, acc5 = validate(val_loader, model, finetune=True)
-        
+    for epoch in range(args.ft_epochs):
+        # Train and evaluate
+        loss = train(train_loader, model, optimizer, scheduler, epoch, finetune=True)
+        acc1, acc5 = validate(val_loader, model)
+
         if args.local_rank == 0:
-            # remember best prec@1 and save checkpoint
+            # Remember best prec@1 and save checkpoint
             is_best = acc1 > best_acc1
             if is_best:
                 best_acc1 = acc1
-    
-            tfboard_writer.add_scalar('finetune/loss-epoch', loss, epoch)
-            tfboard_writer.add_scalar('finetune/acc1-epoch', acc1, epoch)
-            tfboard_writer.add_scalar('finetune/acc5-epoch', acc5, epoch)
-            logger.info("Best acc1=%.5f" % best_acc1)
 
-            # save checkpoint
+            # Save checkpoint and log info
             save_checkpoint({
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer' : optimizer_finetune.state_dict()
-                }, is_best, path=args.tmp, filename="checkpoint-retrain.pth")
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'best_acc1': best_acc1,
+                    'optimizer' : optimizer.state_dict()
+            }, is_best, path=args.save_path, filename="finetune-checkpoint.pth")
+            logger.info("Best acc1=%.5f" % best_acc1)
+            tfboard_writer.add_scalar('finetune/loss', loss, epoch)
+            tfboard_writer.add_scalar('finetune/acc1', acc1, epoch)
+            tfboard_writer.add_scalar('finetune/acc5', acc5, epoch)
+            
 
 def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetune=False):
     if args.local_rank == 0:
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
-        losses = AverageMeter()
-        top1 = AverageMeter()
-        top5 = AverageMeter()
+        data_times, batch_times, losses, acc1, acc5 = [AverageMeter() for _ in range(5)]
+        train_loader_len = int(np.ceil(train_loader._size/args.batch_size))
 
-    train_loader_len = int(np.ceil(train_loader._size/args.batch_size))
     # switch to train mode
     model.train()
-
     if args.local_rank == 0:
         end = time.time()
     for i, data in enumerate(train_loader):
-        target = data[0]["label"].squeeze().cuda().long()
-        data = data[0]["data"]
-        if (finetune and args.finetune_fp16) or ((not finetune) and args.fp16):
-            data = data.half()
-
-        # measure data loading time
+        # Load data and distribute to devices
+        image = data[0]["data"]
+        target = data[0]["label"].squeeze().to(local_device).long()
         if args.local_rank == 0:
-            data_time.update(time.time() - end)
-        
-        output = model(data)
-        loss = criterion(output, target)
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        reduced_loss = reduce_tensor(loss)
-        acc1 = reduce_tensor(acc1)
-        acc5 = reduce_tensor(acc5)
-        
-        if args.local_rank == 0:
-            losses.update(reduced_loss.item(), data.size(0))
-            top1.update(acc1.item(), data.size(0))
-            top5.update(acc5.item(), data.size(0))
+            start = time.time()
+            # data_time.update(time.time() - end)
 
-        # compute and adjust lr
+        # Compute the learning rate
         if scheduler is not None:
             lr = scheduler.step()
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
-        
-        # compute gradient and do SGD step
+
+        # Forward training image and compute cross entropy loss
+        prediction = model(image)
+        loss = F.cross_entropy(prediction, target, reduction='mean')
+
+        # One SGD step
         optimizer.zero_grad()
-        if args.finetune_fp16:
-            optimizer.backward(loss)
-        else:
-            loss.backward()
+        loss.backward()
         if not finetune and l1lambda > 0.:
             impose_group_lasso(model, l1lambda)
         optimizer.step()
-        
-        # measure elapsed time
-        torch.cuda.synchronize()
+
+        # Compute accuracy
+        top1, top5 = accuracy(prediction, target, topk=(1, 5))
+
+        # Gather tensors from different devices
+        loss = reduce_tensor(loss)
+        top1 = reduce_tensor(top1)
+        top5 = reduce_tensor(top5)
+
+        # Update AverageMeter stats
         if args.local_rank == 0:
-            batch_time.update(time.time() - end)
-            lr = optimizer.param_groups[0]["lr"]
-        
+            data_times.update(start - end)
+            batch_times.update(time.time() - start)
+            losses.update(loss.item(), image.size(0))
+            acc1.update(top1.item(), image.size(0))
+            acc5.update(top5.item(), image.size(0))
+        # torch.cuda.synchronize()
+
+        # Update permutation matrices P and Q per 500 iters
         if not finetune and (i+1) % 500 == 0:
             if args.local_rank == 0:    
-                update_permutation_matrix(model, iters=args.iter_iters)
+                update_permutation_matrix(model, iters=5)
             synchronize_model(model)
 
+        # Log training info
         if i % args.print_freq == 0 and args.local_rank == 0:
-            tfboard_writer.add_scalar("finetune/iter-lr" if finetune else "train/iter-lr", lr, epoch*train_loader_len+i)
-            logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                        'Dt {data_time.val:.3f} ({data_time.avg:.3f}) Loss {loss.val:.3f} ({loss.avg:.3f}) '
-                        'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) Prec@5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}' \
-                        .format(epoch, args.finetune_epochs if finetune else args.epochs, i, train_loader_len, batch_time=batch_time, data_time=data_time,
-                                loss=losses, top1=top1, top5=top5, lr=lr, l1=l1lambda))
-        
+            lr = optimizer.param_groups[0]["lr"]
+            tfboard_writer.add_scalar("finetune/learning-rate" if finetune else "train/learning-rate", lr, epoch*train_loader_len+i)
+            logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.avg:.3f} Dt {data_time.avg:.3f} '
+                        'Loss {loss.val:.3f} ({loss.avg:.3f}) Acc1 {top1.val:.3f} ({top1.avg:.3f}) '
+                        'Acc5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}'.format(
+                                epoch, args.finetune_epochs if finetune else args.epochs,
+                                i, train_loader_len, batch_time=batch_times, data_time=data_times,
+                                loss=losses, top1=acc1, top5=acc5, lr=lr, l1=l1lambda
+                        ))
         if args.local_rank == 0:
             end = time.time()
-        
+
+    # Reset training loader
     train_loader.reset()
-    loss = torch.tensor([losses.avg]).cuda() if args.local_rank == 0 else torch.tensor([0.]).cuda()
+    loss = torch.tensor([losses.avg]).to(local_device) if args.local_rank == 0 else torch.tensor([0.]).to(local_device)
     dist.broadcast(loss, 0)
     return loss.cpu().item()
 
+
 @torch.no_grad()
-def validate(val_loader, model, finetune=False):
-    losses = AverageMeter()
+def validate(val_loader, model):
     if args.local_rank == 0:
-        batch_time = AverageMeter()
-        top1 = AverageMeter()
-        top5 = AverageMeter()
-    # switch to evaluate mode
-    model.eval()
-    if args.local_rank == 0:
+        losses, top1, top5 = [AverageMeter() for _ in range(3)]
         val_loader_len = int(np.ceil(val_loader._size/50))
-        
-        end = time.time()
+
+    # Switch to evaluate mode
+    model.eval()
     for i, data in enumerate(val_loader):
-        target = data[0]["label"].squeeze().cuda().long()
-        data = data[0]["data"]
-        if (finetune and args.finetune_fp16) or ((not finetune) and args.fp16):
-            data = data.half()
+        image = data[0]["data"]
+        target = data[0]["label"].squeeze().to(local_device).long()
 
-        # compute output
-        output = model(data)
-        loss = criterion(output, target)
+        # Compute output
+        prediction = model(image)
+        loss = F.cross_entropy(prediction, target, reduction='mean')
 
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        # Measure accuracy and record loss
+        acc1, acc5 = accuracy(prediction, target, topk=(1, 5))
 
-        if args.distributed:
-            reduced_loss = reduce_tensor(loss.data)
-            acc1 = reduce_tensor(acc1)
-            acc5 = reduce_tensor(acc5)
-        else:
-            reduced_loss = loss.data
+        # Gather tensors from different devices
+        loss = reduce_tensor(loss)
+        acc1 = reduce_tensor(acc1)
+        acc5 = reduce_tensor(acc5)
 
+        # Update meters and log info
         if args.local_rank == 0:
-            losses.update(reduced_loss.item(), data.size(0))
+            losses.update(loss.item(), data.size(0))
             top1.update(acc1.item(), data.size(0))
             top5.update(acc5.item(), data.size(0))
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
-
             if i % args.print_freq == 0:
-                logger.info('Test: [{0}/{1}] Test Loss {loss.val:.3f} (avg={loss.avg:.3f}) Prec@1 {top1.val:.3f} '
-                            '(avg={top1.avg:.3f}) Prec@5 {top5.val:.3f} (avg={top5.avg:.3f})' \
+                logger.info('Test: [{0}/{1}] Test Loss {loss.val:.3f} (avg={loss.avg:.3f}) '
+                            'Acc1 {top1.val:.3f} (avg={top1.avg:.3f}) Acc5 {top5.val:.3f} (avg={top5.avg:.3f})' \
                             .format(i, val_loader_len, loss=losses, top1=top1, top5=top5))
 
     if args.local_rank == 0:
         logger.info(' * Prec@1 {top1.avg:.5f} Prec@5 {top5.avg:.5f}'.format(top1=top1, top5=top5))
 
+    # Reset validation loader
     val_loader.reset()
-    top1 = torch.tensor([top1.avg]).cuda() if args.local_rank == 0 else torch.tensor([0.]).cuda()
-    top5 = torch.tensor([top5.avg]).cuda() if args.local_rank == 0 else torch.tensor([0.]).cuda()
+    top1 = torch.tensor([top1.avg]).to(local_device) if args.local_rank == 0 else torch.tensor([0.]).to(local_device)
+    top5 = torch.tensor([top5.avg]).to(local_device) if args.local_rank == 0 else torch.tensor([0.]).to(local_device)
     dist.broadcast(top1, 0)
     dist.broadcast(top5, 0)
     return top1.cpu().item(), top5.cpu().item()
+
 
 def reduce_tensor(tensor):
     rt = tensor.clone()
     dist.reduce(rt, 0, op=dist.ReduceOp.SUM)
     rt /= args.world_size
     return rt
+
 
 if __name__ == '__main__':
     main()

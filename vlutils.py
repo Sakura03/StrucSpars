@@ -22,6 +22,7 @@ class Logger():
         self.file_handler.close()
         self.stdout_handler.close()
 
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
     def __init__(self):
@@ -39,11 +40,12 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
-def save_checkpoint(state, is_best, path, filename="checkpoint.pth"):
 
+def save_checkpoint(state, is_best, path, filename="checkpoint.pth"):
     torch.save(state, join(path, filename))
     if is_best:
         shutil.copyfile(join(path, filename), join(path, 'model_best.pth'))
+
 
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
@@ -60,6 +62,7 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
 
 def cifar10(path='data/cifar10', bs=100, num_workers=8):
     train_transform = transforms.Compose([
@@ -84,6 +87,7 @@ def cifar10(path='data/cifar10', bs=100, num_workers=8):
 
     return train_loader, test_loader
 
+
 def cifar100(path='data/cifar100', bs=256, num_workers=8):
     train_transform = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -106,6 +110,7 @@ def cifar100(path='data/cifar100', bs=256, num_workers=8):
                                                num_workers=num_workers)
 
     return train_loader, test_loader
+
 
 class CosAnnealingLR(object):
     def __init__(self, loader_len, epochs, lr_max, warmup_epochs=0, last_epoch=-1):
@@ -137,58 +142,3 @@ class CosAnnealingLR(object):
             self.lr = (1 + math.cos((self.iter_counter-self.warmup_iters) / \
                                     (self.max_iters - self.warmup_iters) * math.pi)) / 2 * self.lr_max
         return self.lr
-
-class LinearLR(object):
-    def __init__(self, total_iters, lr_max, last_iter=-1):
-        assert lr_max >= 0
-        assert total_iters >= 0
-
-        self.total_iters = total_iters
-        self.lr_max = lr_max
-        self.last_iter = last_iter
-        
-        assert self.last_iter >= -1
-        self.iter_counter = self.last_iter + 1
-    
-    def restart(self, lr_max=None):
-        if lr_max:
-            self.lr_max = lr_max
-        self.iter_counter = 0 
-
-    def step(self):
-        self.iter_counter += 1
-        self.lr = max((1. - self.iter_counter / self.total_iters) * self.lr_max, 0.)
-        return self.lr
-
-class MultiStepLR(object):
-    def __init__(self, loader_len, milestones, gamma=None, gammas=None, base_lr=0.1, warmup_epochs=0, last_epoch=-1):
-        if gamma is not None and gammas is not None:
-            raise ValueError("either specify gamma or gammas")
-        if gamma is not None:
-            gammas = [gamma] * len(milestones)
-        assert isinstance(milestones, list)
-        assert isinstance(gammas, list)
-        assert len(milestones) == len(gammas)
-
-        self.warmup_iters = warmup_epochs * loader_len
-        self.loader_len = loader_len
-        self.base_lr = base_lr
-        self.lr = base_lr
-        self.milestones = milestones
-        self.gammas = gammas
-        self.last_epoch = last_epoch
-
-        assert self.last_epoch >= -1
-        self.iter_counter = (self.last_epoch+1) * loader_len
-        self.milestone_counter = 0
-
-    def step(self):
-        self.iter_counter += 1
-        if self.warmup_iters > 0 and self.iter_counter <= self.warmup_iters:
-            self.lr = float(self.iter_counter / self.warmup_iters) * self.base_lr
-        else:
-            if self.milestone_counter < len(self.milestones) and self.iter_counter == self.milestones[self.milestone_counter] * self.loader_len:
-                self.lr = self.lr * self.gammas[self.milestone_counter]
-                self.milestone_counter += 1
-        return self.lr
-

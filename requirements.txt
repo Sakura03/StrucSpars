@@ -1,8 +1,0 @@
-tensorboard==1.14.0
-tensorboardX==1.8
-torch==1.2.0
-torchvision==0.4.0
-thop==0.0.31.post1910221610
-numpy==1.14.6
-nvidia-dali==0.13.0
-apex==0.1

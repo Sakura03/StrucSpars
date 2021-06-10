@@ -3,8 +3,6 @@
 #                                    --data "/media/ssd/imagenet/rec" \
 #                                    --tmp "results/imagenet-densenet-baseline" \
 #                                    --batch-size "32" \
-#                                    --use-rec \
-#                                    --dali-cpu \
 #                                    --warmup "5"
 
 ### train lightweight model
@@ -16,6 +14,4 @@ python -m torch.distributed.launch --nproc_per_node=4 train_imagenet.py \
                                    --wd "4e-5" \
                                    --epochs "240" \
                                    --lr "0.1" \
-                                   --lightweight \
-                                   --use-rec \
                                    --warmup "5"

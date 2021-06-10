@@ -3,7 +3,7 @@ import numpy as np
 from os.path import join, isfile, abspath
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, cifar10, cifar100, MultiStepLR
 from model import * 
-from utils import get_factors, get_sparsity, get_sparsity_loss, get_threshold, impose_group_lasso
+from utils import get_perm_weight_norm, get_sparsity, get_threshold, impose_group_lasso
 from utils import set_group_levels, update_permutation_matrix, mask_group, real_group
 from tensorboardX import SummaryWriter
 from thop import profile, count_hooks
@@ -74,7 +74,7 @@ def main():
         args.num_classes = 100
 
     # model and optimizer
-    model_name = "resnet%d_cifar(num_classes=%d, groupable=True)" % (args.depth, args.num_classes)
+    model_name = "resnet%d_cifar(num_classes=%d, power=%f)" % (args.depth, args.num_classes, args.power)
     model = eval(model_name).cuda()
     flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(), ), custom_ops=custom_ops, verbose=False)
     tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
@@ -113,14 +113,14 @@ def main():
     scheduler = None if args.fix_lr else MultiStepLR(len(train_loader), milestones=args.milestones, gamma=args.gamma)
     
     # before initial update
-    factors = get_factors(model)
+    factors = get_perm_weight_norm(model)
     torch.save(factors, join(args.tmp, "factors", "before-permutation.pth"))
     for k, v in factors.items():
         tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=-1)
     # initially update P and Q
     update_permutation_matrix(model, iters=args.init_iters)
     # after initial update
-    factors = get_factors(model)
+    factors = get_perm_weight_norm(model)
     torch.save(factors, join(args.tmp, "factors", "after-permutation.pth"))
     for k, v in factors.items():
         tfboard_writer.add_image("train/%s" % k, v.unsqueeze(0) / (v.max()+1e-8), global_step=-1)
@@ -131,16 +131,11 @@ def main():
         # train and evaluate
         loss = train(train_loader, model, optimizer, scheduler, epoch, l1lambda=args.sparsity if epoch >= args.warmup else 0.)
         acc1, acc5 = validate(val_loader, model)
-        
         # update P and Q
         update_permutation_matrix(model, iters=args.epoch_iters)
-        
-        # compute the regularity
-        sloss = get_sparsity_loss(model, enable_grad=False)
-        
         # calculate sparsity, FLOPs and params
         m = eval(model_name).cuda()
-        factors = get_factors(model)
+        factors = get_perm_weight_norm(model)
         group_levels = mask_group(m, factors, args.sparse_thres, logger)
         real_group(m)
         set_group_levels(model, group_levels)
@@ -185,7 +180,6 @@ def main():
         tfboard_writer.add_scalar("train/FLOPs", flops, epoch)
         tfboard_writer.add_scalar("train/Params", params, epoch)
         tfboard_writer.add_scalar('train/loss-epoch', loss, epoch)
-        tfboard_writer.add_scalar('train/sloss-epoch', sloss, epoch)
         tfboard_writer.add_scalar('train/model-sparsity', model_sparsity, epoch)
         tfboard_writer.add_scalar('train/sparse-penalty', args.sparsity, epoch)
         tfboard_writer.add_scalar('test/acc1-epoch', acc1, epoch)
@@ -208,7 +202,7 @@ def main():
     with torch.no_grad():    
         thres = get_threshold(model, args.percent)
     # calculate final sparsity, FLOPs, and params
-    factors = get_factors(model)
+    factors = get_perm_weight_norm(model)
     m = eval(model_name).cuda()
     group_levels = mask_group(m, factors, thres, logger=None)
     real_group(m)

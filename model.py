@@ -5,12 +5,13 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import torch.utils.checkpoint as cp
 from collections import OrderedDict
+
 __all__ = ['GroupableConv2d', 'resnet18', 'resnet34', 'resnet50', 'resnet101', 
            'resnet152', 'resnext50_32x4d', 'resnext101_32x8d', 'wide_resnet50_2',
            'wide_resnet101_2', 'resnet20_cifar', 'resnet32_cifar', 'resnet44_cifar',
-           'resnet56_cifar', 'resnet110_cifar', 'resnet1202_cifar', 'vgg11', 'vgg13',
-           'vgg16', 'vgg19', 'vgg11_bn', 'vgg13_bn', 'vgg16_bn', 'vgg19_bn',
-           'densenet121', 'densenet161', 'densenet169', 'densenet201', 'shufflenet_v1']
+           'resnet56_cifar', 'resnet110_cifar', 'resnet1202_cifar', 'densenet121',
+           'densenet161', 'densenet169', 'densenet201']
+
 
 #####################################################################################
 #####################################################################################
@@ -18,63 +19,51 @@ __all__ = ['GroupableConv2d', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
 #####################################################################################
 #####################################################################################
 
-def isPower(n):
-    if n < 1:
-        return False
-    i = 1
-    while i <= n:
-        if i == n:
-            return True
-        i <<= 1
-    return False
-
 @torch.no_grad()
-def get_penalty_matrix(dim1, dim2, level=None, power=0.5):
-    # assert isPower(dim1) and isPower(dim2)
+def get_struc_reg_mat(dim1, dim2, level=None, power=0.5):
     if level is None: level = 100
-    weight = torch.zeros(dim1, dim2)
-    assign_location(weight, 1., level, power)
-    return weight
+    struc_reg = torch.zeros(dim1, dim2)
+    assign_location(struc_reg, 1.0, level, power)
+    return struc_reg
+
 
 @torch.no_grad()
-def assign_location(tensor, num, level, power):
+def assign_location(tensor, value, level, power):
     dim1, dim2 = tensor.size()
-    # if dim1 == 1 or dim2 == 1 or level == 0:
-    if dim1 % 2 != 0 or dim2 % 2 != 0 or level == 0:
-        return
-    else:
-        tensor[dim1//2:, :dim2//2] = num
-        tensor[:dim1//2, dim2//2:] = num
-        assign_location(tensor[dim1//2:, dim2//2:], num*power, level-1, power)
-        assign_location(tensor[:dim1//2, :dim2//2], num*power, level-1, power)
+    if dim1 % 2 == 0 and dim2 % 2 == 0 and level > 0:
+        tensor[dim1//2:, :dim2//2] = value
+        tensor[:dim1//2, dim2//2:] = value
+        assign_location(tensor[dim1//2:, dim2//2:], value*power, level-1, power)
+        assign_location(tensor[:dim1//2, :dim2//2], value*power, level-1, power)
+
 
 @torch.no_grad()
 def get_mask_from_level(level, dim1, dim2):
     mask = torch.ones(dim1, dim2)
-    penalty = get_penalty_matrix(dim1, dim2, level-1)
-    u = torch.unique(penalty, sorted=True)
+    struc_reg = get_struc_reg_mat(dim1, dim2, level-1)
+    u = torch.unique(struc_reg, sorted=True)
     for i in range(1, level):
-        mask[penalty == u[-i]] = 0.
+        mask[struc_reg == u[-i]] = 0.0
     return mask
+
 
 class GroupableConv2d(nn.Conv2d):
     r"""
-    attributes of `GroupableConv2d`:
-        a) `group_level` indicates the number of groups that can be achieved currently;
-        b) `power` indicates the decay power of the attribute `template`;
-        c) `mask_grouped` and `real_grouped` indicate whether `mask_group` or `real_group` has been called, respectively;
-        d) `P`, `Q`, `P_inv`, `Q_inv` indicate the row and column permutation matrices and their inverses, respectively;
-        e) `shuffled_penalty` indicates the row- and column-shuffled penalty matrix (which depends on `P`, `Q`, `power`, and `group_level`) (shape: [C_out, C_in , 1, 1]);
-        f) `template` indicates the penalty matrix when computing the optimal permutations `P` and `Q`;
-        g) `permutated_mask` indicates the row- and column-shuffled mask matrix after `mask_group`.
-    
-    methods of `GroupableConv2d`:
-        a) `set_group_level` receives the current group level, and set the current `group_level` and `shuffled_penalty` accordingly;
-        b) `update_PQ` receives the number of iterations, and update the permutations `P`, `Q`, `P_inv`, `Q_inv`, and `shuffled_penalty`;
-        c) `compute_regularity` computes the sparsity regularity according to the current `shuffled_penalty`;
-        d) `impose_regularity` imposes L1-penalty on the conv weights directly, according to the current `shuffled_penalty`;
-        e) `mask_group` creates `permutated_mask` and mask the conv weights according to the current `group_level` attribute;
-        f) `real_group` actually sets the attribute `groups`, and prunes the conv weights
+    attributes:
+        a) group_level: current group level;
+        b) power: decay factor of structured regularization matrix;
+        c) mask_grouped/real_grouped: whether `mask_group`/`real_group` has been called;
+        d) P/Q/P_inv/Q_inv: row/column permutation matrices and their inverses;
+        e) struc_reg_mat: row- and column-shuffled structured regularization matrix (depending on P, Q, power, and group_level);
+        f) cost_mat: cost matrix in linear programming;
+        g) permutated_mask: row- and column-shuffled mask matrix after mask group.
+
+    methods:
+        a) set_group_level: set attributes --- group_level and struc_reg_mat;
+        b) update_PQ: solve the linear programs and update P and Q alternatively (update variables: P, Q, P_inv, Q_inv, and struc_reg_mat);
+        c) impose_struc_reg: directly imposes structured L1-refularization on the conv weights;
+        d) mask_group: after calling, mask part of conv weights in each fwd pass;
+        e) real_group: actually prunes conv weights and form GroupConvs.
     """
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True, power=0.5):
         super(GroupableConv2d, self).__init__(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
@@ -86,24 +75,22 @@ class GroupableConv2d(nn.Conv2d):
         self.register_buffer("P_inv", torch.arange(self.out_channels))
         self.register_buffer("Q", torch.arange(self.in_channels))
         self.register_buffer("Q_inv", torch.arange(self.in_channels))
-        penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power)
-        self.register_buffer('shuffled_penalty', penalty[self.P_inv, :][:, self.Q_inv])
-        # self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
-        self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
-        self.template = get_penalty_matrix(self.out_channels, self.in_channels, power=self.power).numpy().astype(np.float64)
+        struc_reg = get_struc_reg_mat(self.out_channels, self.in_channels, level=self.group_level, power=self.power)
+        self.register_buffer('struc_reg_mat', struc_reg)
+        self.cost_mat = get_struc_reg_mat(self.out_channels, self.in_channels, power=self.power).numpy().astype(np.float64)
 
-    def matrix2idx(self, P, row=True):
+    @staticmethod
+    def matrix2idx(P, row=True):
         idx = np.argmax(P, axis=1 if row else 0)
         assert np.all(np.bincount(idx) == 1), "Invalid permutation matrix."
         return idx 
-    
+
     def set_group_level(self, group_level):
         if self.group_level != group_level:
             self.group_level = group_level
-            penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
-            self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
-            self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
-    
+            struc_reg = get_struc_reg_mat(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device)
+            self.struc_reg_mat = struc_reg[self.P_inv, :][:, self.Q_inv]
+
     def update_PQ(self, iters):
         ones_P, ones_Q = np.ones((self.out_channels, ), dtype=np.float64), np.ones((self.in_channels, ), dtype=np.float64)
         P, Q = self.P.cpu().numpy(), self.Q.cpu().numpy()
@@ -112,64 +99,57 @@ class GroupableConv2d(nn.Conv2d):
 
         for _ in range(iters):
             permutated_weight_norm = weight_norm[:, Q]
-            M = np.matmul(self.template, permutated_weight_norm.T)
+            M = np.matmul(self.cost_mat, permutated_weight_norm.T)
             P = ot.emd(ones_P, ones_P, M)
             P = self.matrix2idx(P, row=True)
-            loss1 = np.sum(weight_norm[P, :][:, Q] * self.template)
-            
+            loss1 = np.sum(weight_norm[P, :][:, Q] * self.cost_mat)
+
             permutated_weight_norm = weight_norm[P, :]
-            M = np.matmul(permutated_weight_norm.T, self.template)
+            M = np.matmul(permutated_weight_norm.T, self.cost_mat)
             Q = ot.emd(ones_Q, ones_Q, M)
             Q = self.matrix2idx(Q, row=False)
-            loss2 = np.sum(weight_norm[P, :][:, Q] * self.template)
+            loss2 = np.sum(weight_norm[P, :][:, Q] * self.cost_mat)
             if loss1 == loss2: break
-        
+
         self.P, self.Q = torch.from_numpy(P).to(device=self.weight.data.device), torch.from_numpy(Q).to(device=self.weight.data.device)
         self.P_inv, self.Q_inv = torch.argsort(self.P), torch.argsort(self.Q)
-        penalty = get_penalty_matrix(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
-        self.shuffled_penalty = penalty[self.P_inv, :][:, self.Q_inv]
-        self.shuffled_penalty.unsqueeze_(-1).unsqueeze_(-1)
-    
-    def compute_regularity(self):
-        weight_norm = torch.norm(self.weight.view(self.out_channels, self.in_channels, -1), dim=-1, p=1)
-        return torch.sum(weight_norm * self.shuffled_penalty.squeeze())
-    
-    def impose_regularity(self, l1lambda):
-        self.weight.grad.add_(l1lambda * (torch.sign(self.weight.data) * self.shuffled_penalty))
-    
+        struc_reg = get_struc_reg_mat(self.out_channels, self.in_channels, level=self.group_level, power=self.power).to(device=self.weight.data.device)
+        self.struc_reg_mat = struc_reg[self.P_inv, :][:, self.Q_inv]
+
+    def impose_struc_reg(self, l1lambda):
+        self.weight.grad.add_(l1lambda * (torch.sign(self.weight.data) * self.struc_reg_mat.unsqueeze(-1).unsqueeze(-1)))
+
     def mask_group(self):
-        self.mask_grouped = True
-        mask = get_mask_from_level(self.group_level, self.out_channels, self.in_channels).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
-        self.permuted_mask = mask[self.P_inv, :][:, self.Q_inv]
-        self.permuted_mask.unsqueeze_(dim=-1).unsqueeze_(dim=-1)
+        mask = get_mask_from_level(self.group_level, self.out_channels, self.in_channels).to(device=self.weight.data.device)
+        self.permuted_mask = mask[self.P_inv, :][:, self.Q_inv].unsqueeze(-1).unsqueeze(-1)
         self.weight.data *= self.permuted_mask
-        if hasattr(self, "template"): del self.template
-        if hasattr(self, "shuffled_penalty"): del self.shuffled_penalty
+        if hasattr(self, "cost_mat"): del self.cost_mat
+        if hasattr(self, "struc_reg_mat"): del self.struc_reg_mat
+        self.mask_grouped = True
 
     def real_group(self):
-        self.real_grouped = True
-        self.groups = 2 ** (self.group_level-1)
-        weight = torch.zeros(self.out_channels, self.in_channels // self.groups, *self.kernel_size).to(device=self.weight.data.device, dtype=self.weight.data.dtype)
+        self.groups = 2 ** (self.group_level - 1)
+        weight = torch.zeros(self.out_channels, self.in_channels // self.groups, *self.kernel_size).to(device=self.weight.data.device)
         split_out, split_in = self.out_channels // self.groups, self.in_channels // self.groups
         for g in range(self.groups):
             permuted_weight = self.weight.data[self.P, :][:, self.Q]
             weight[g*split_out:(g+1)*split_out] = permuted_weight[g*split_out:(g+1)*split_out, g*split_in:(g+1)*split_in, :, :]
         del self.weight
         self.weight = nn.Parameter(weight)
-        if hasattr(self, "template"): del self.template
-        if hasattr(self, "shuffled_penalty"): del self.shuffled_penalty
+        if hasattr(self, "cost_mat"): del self.cost_mat
+        if hasattr(self, "struc_reg_mat"): del self.struc_reg_mat
+        self.real_grouped = True
 
     def forward(self, x):
         if self.real_grouped:
             x = x[:, self.Q, :, :]
-            out = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-            out = out[:, self.P_inv, :, :]
         elif self.mask_grouped:
             self.weight.data *= self.permuted_mask
-            out = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        else:
-            out = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        out = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        if self.real_grouped:
+            out = out[:, self.P_inv, :, :]
         return out
+
 
 #####################################################################################
 #####################################################################################
@@ -177,34 +157,30 @@ class GroupableConv2d(nn.Conv2d):
 #####################################################################################
 #####################################################################################
 
-def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1, groupable=True, power=0.5):
+def conv3x3(in_planes, out_planes, stride=1, dilation=1, power=0.5):
     """3x3 convolution with padding"""
-    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=dilation, bias=False, dilation=dilation, power=power) if groupable \
-           else nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=dilation, groups=groups, bias=False, dilation=dilation)
+    return GroupableConv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=dilation, bias=False, dilation=dilation, power=power)
 
-def conv1x1(in_planes, out_planes, stride=1, groups=1, groupable=False, power=0.5):
+
+def conv1x1(in_planes, out_planes, stride=1, power=0.5):
     """1x1 convolution"""
-    return GroupableConv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False, power=power) if groupable \
-           else nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, groups=groups, bias=False)
+    return GroupableConv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False, power=power)
+
 
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, group1x1=False,
-                 group3x3=True, power=0.5):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, dilation=1, norm_layer=None, power=0.5):
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
-        if groups != 1 or base_width != 64:
-            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv3x3(inplanes, planes, stride, groupable=group3x3, power=power)
+        self.conv1 = conv3x3(inplanes, planes, stride, power=power)
         self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes, groupable=group3x3, power=power)
+        self.conv2 = conv3x3(planes, planes, power=power)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
@@ -231,19 +207,16 @@ class BasicBlock(nn.Module):
 class Bottleneck(nn.Module):
     expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, group1x1=False,
-                 group3x3=True, power=0.5):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, dilation=1, norm_layer=None, power=0.5):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
-        width = int(planes * (base_width / 64.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv1x1(inplanes, width, groupable=group1x1, power=power)
-        self.bn1 = norm_layer(width)
-        self.conv2 = conv3x3(width, width, stride, groups, dilation, groupable=group3x3, power=power)
-        self.bn2 = norm_layer(width)
-        self.conv3 = conv1x1(width, planes * self.expansion, groupable=group1x1, power=power)
+        self.conv1 = conv1x1(inplanes, planes, power=power)
+        self.bn1 = norm_layer(planes)
+        self.conv2 = conv3x3(planes, planes, stride, dilation, power=power)
+        self.bn2 = norm_layer(planes)
+        self.conv3 = conv1x1(planes, planes * self.expansion, power=power)
         self.bn3 = norm_layer(planes * self.expansion)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
@@ -275,8 +248,7 @@ class Bottleneck(nn.Module):
 class ResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
-                 groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None, group1x1=False, group3x3=True, power=0.5):
+                 norm_layer=None, power=0.5):
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -285,29 +257,14 @@ class ResNet(nn.Module):
         self.inplanes = 64
         self.dilation = 1
         self.power = power
-        self.group1x1 = group1x1
-        self.group3x3 = group3x3
-        if replace_stride_with_dilation is None:
-            # each element in the tuple indicates if we should replace
-            # the 2x2 stride with a dilated convolution instead
-            replace_stride_with_dilation = [False, False, False]
-        if len(replace_stride_with_dilation) != 3:
-            raise ValueError("replace_stride_with_dilation should be None "
-                             "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
-        self.groups = groups
-        self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
-                               bias=False)
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
-                                       dilate=replace_stride_with_dilation[0])
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
-                                       dilate=replace_stride_with_dilation[1])
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
-                                       dilate=replace_stride_with_dilation[2])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -328,29 +285,20 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
+    def _make_layer(self, block, planes, blocks, stride=1):
         norm_layer = self._norm_layer
         downsample = None
-        previous_dilation = self.dilation
-        if dilate:
-            self.dilation *= stride
-            stride = 1
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride, groupable=self.group1x1, power=self.power),
+                conv1x1(self.inplanes, planes * block.expansion, stride, power=self.power),
                 norm_layer(planes * block.expansion),
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer,
-                            group1x1=self.group1x1, group3x3=self.group3x3, power=self.power))
+        layers.append(block(self.inplanes, planes, stride, downsample, norm_layer, power=self.power))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes, groups=self.groups,
-                                base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer, group1x1=self.group1x1,
-                                group3x3=self.group3x3, power=self.power))
+            layers.append(block(self.inplanes, planes, dilation=self.dilation, norm_layer=norm_layer, power=self.power))
 
         return nn.Sequential(*layers)
 
@@ -372,88 +320,31 @@ class ResNet(nn.Module):
         return x
 
 
-def _resnet(arch, block, layers, **kwargs):
+def _resnet(block, layers, **kwargs):
     model = ResNet(block, layers, **kwargs)
     return model
-
-
-def resnet18(**kwargs):
-    r"""ResNet-18 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
-    """
-    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], **kwargs)
-
-
-def resnet34(**kwargs):
-    r"""ResNet-34 model from
-    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
-    """
-    return _resnet('resnet34', BasicBlock, [3, 4, 6, 3], **kwargs)
 
 
 def resnet50(**kwargs):
     r"""ResNet-50 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     """
-    return _resnet('resnet50', Bottleneck, [3, 4, 6, 3], **kwargs)
+    return _resnet(Bottleneck, [3, 4, 6, 3], **kwargs)
 
 
 def resnet101(**kwargs):
     r"""ResNet-101 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     """
-    return _resnet('resnet101', Bottleneck, [3, 4, 23, 3], **kwargs)
+    return _resnet(Bottleneck, [3, 4, 23, 3], **kwargs)
 
 
 def resnet152(**kwargs):
     r"""ResNet-152 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     """
-    return _resnet('resnet152', Bottleneck, [3, 8, 36, 3], **kwargs)
+    return _resnet(Bottleneck, [3, 8, 36, 3], **kwargs)
 
-
-def resnext50_32x4d(**kwargs):
-    r"""ResNeXt-50 32x4d model from
-    `"Aggregated Residual Transformation for Deep Neural Networks" <https://arxiv.org/pdf/1611.05431.pdf>`_
-    """
-    kwargs['groups'] = 32
-    kwargs['width_per_group'] = 4
-    return _resnet('resnext50_32x4d', Bottleneck, [3, 4, 6, 3], **kwargs)
-
-
-def resnext101_32x8d(**kwargs):
-    r"""ResNeXt-101 32x8d model from
-    `"Aggregated Residual Transformation for Deep Neural Networks" <https://arxiv.org/pdf/1611.05431.pdf>`_
-    """
-    kwargs['groups'] = 32
-    kwargs['width_per_group'] = 8
-    return _resnet('resnext101_32x8d', Bottleneck, [3, 4, 23, 3], **kwargs)
-
-
-def wide_resnet50_2(**kwargs):
-    r"""Wide ResNet-50-2 model from
-    `"Wide Residual Networks" <https://arxiv.org/pdf/1605.07146.pdf>`_
-
-    The model is the same as ResNet except for the bottleneck number of channels
-    which is twice larger in every block. The number of channels in outer 1x1
-    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
-    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
-    """
-    kwargs['width_per_group'] = 64 * 2
-    return _resnet('wide_resnet50_2', Bottleneck, [3, 4, 6, 3], **kwargs)
-
-
-def wide_resnet101_2(**kwargs):
-    r"""Wide ResNet-101-2 model from
-    `"Wide Residual Networks" <https://arxiv.org/pdf/1605.07146.pdf>`_
-
-    The model is the same as ResNet except for the bottleneck number of channels
-    which is twice larger in every block. The number of channels in outer 1x1
-    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
-    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
-    """
-    kwargs['width_per_group'] = 64 * 2
-    return _resnet('wide_resnet101_2', Bottleneck, [3, 4, 23, 3], **kwargs)
 
 #####################################################################################
 #####################################################################################
@@ -462,35 +353,25 @@ def wide_resnet101_2(**kwargs):
 #####################################################################################
 
 def _weights_init(m):
-    if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+    if isinstance(m, nn.Linear) or isinstance(m, (nn.Conv2d, GroupableConv2d)):
         init.kaiming_normal_(m.weight)
 
-class LambdaLayer(nn.Module):
-    def __init__(self, lambd):
-        super(LambdaLayer, self).__init__()
-        self.lambd = lambd
 
-    def forward(self, x):
-        return self.lambd(x)
-
-class BasicBlock_cifar(nn.Module):
+class BasicBlockCIFAR(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride=1, groupable=True, power=0.5):
-        super(BasicBlock_cifar, self).__init__()
-        self.conv1 = GroupableConv2d(in_planes, planes, 3, stride, 1, bias=False, power=power) if groupable \
-                     else nn.Conv2d(in_planes, planes, 3, stride, 1, bias=False)
+    def __init__(self, in_planes, planes, stride=1, power=0.5):
+        super(BasicBlockCIFAR, self).__init__()
+        self.conv1 = GroupableConv2d(in_planes, planes, 3, stride, 1, bias=False, power=power)
         self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = GroupableConv2d(planes, planes, 3, 1, 1, bias=False, power=power) if groupable \
-                     else nn.Conv2d(planes, planes, 3, 1, 1, bias=False)
+        self.conv2 = GroupableConv2d(planes, planes, 3, 1, 1, bias=False, power=power)
         self.bn2 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
 
         self.shortcut = nn.Sequential()
         if stride != 1 or in_planes != planes:
             self.shortcut = nn.Sequential(
-                GroupableConv2d(in_planes, self.expansion*planes, 1, stride, bias=False, power=power) if groupable \
-                else nn.Conv2d(in_planes, self.expansion*planes, 1, stride, bias=False),
+                GroupableConv2d(in_planes, self.expansion*planes, 1, stride, bias=False, power=power),
                 nn.BatchNorm2d(self.expansion*planes)
             )
 
@@ -502,11 +383,10 @@ class BasicBlock_cifar(nn.Module):
         return out
 
 
-class ResNet_cifar(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10, groupable=True, power=0.5):
-        super(ResNet_cifar, self).__init__()
+class ResNetCIFAR(nn.Module):
+    def __init__(self, block, num_blocks, num_classes=10, power=0.5):
+        super(ResNetCIFAR, self).__init__()
         self.in_planes = 16
-        self.groupable = groupable
         self.power = power
         self.conv1 = nn.Conv2d(3, 16, 3, 1, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
@@ -523,7 +403,7 @@ class ResNet_cifar(nn.Module):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_planes, planes, stride, self.groupable, self.power))
+            layers.append(block(self.in_planes, planes, stride, self.power))
             self.in_planes = planes * block.expansion
 
         return nn.Sequential(*layers)
@@ -540,155 +420,24 @@ class ResNet_cifar(nn.Module):
 
 
 def resnet20_cifar(**kwargs):
-    return ResNet_cifar(BasicBlock_cifar, [3, 3, 3], **kwargs)
+    return ResNetCIFAR(BasicBlockCIFAR, [3, 3, 3], **kwargs)
 
 
 def resnet32_cifar(**kwargs):
-    return ResNet_cifar(BasicBlock_cifar, [5, 5, 5], **kwargs)
+    return ResNetCIFAR(BasicBlockCIFAR, [5, 5, 5], **kwargs)
 
 
 def resnet44_cifar(**kwargs):
-    return ResNet_cifar(BasicBlock_cifar, [7, 7, 7], **kwargs)
+    return ResNetCIFAR(BasicBlockCIFAR, [7, 7, 7], **kwargs)
 
 
 def resnet56_cifar(**kwargs):
-    return ResNet_cifar(BasicBlock_cifar, [9, 9, 9], **kwargs)
+    return ResNetCIFAR(BasicBlockCIFAR, [9, 9, 9], **kwargs)
 
 
 def resnet110_cifar(**kwargs):
-    return ResNet_cifar(BasicBlock_cifar, [18, 18, 18], **kwargs)
+    return ResNetCIFAR(BasicBlockCIFAR, [18, 18, 18], **kwargs)
 
-
-def resnet1202_cifar(**kwargs):
-    return ResNet_cifar(BasicBlock_cifar, [200, 200, 200], **kwargs)
-
-#####################################################################################
-#####################################################################################
-#### VGGNet model for ImageNet
-#####################################################################################
-#####################################################################################
-
-class VGG(nn.Module):
-    def __init__(self, features, num_classes=1000, init_weights=True):
-        super(VGG, self).__init__()
-        self.features = features
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
-        self.classifier = nn.Sequential(
-            nn.Linear(512 * 7 * 7, 4096),
-            nn.ReLU(True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
-            nn.ReLU(True),
-            nn.Dropout(),
-            nn.Linear(4096, num_classes),
-        )
-        if init_weights:
-            self._initialize_weights()
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
-        return x
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, GroupableConv2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
-
-
-def make_layers(cfg, batch_norm=False, groupable=True, power=0.5):
-    layers = []
-    in_channels = 3
-    for v in cfg:
-        if v == 'M':
-            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
-        else:
-            conv2d = GroupableConv2d(in_channels, v, 3, 1, 1, power=power) if groupable else nn.Conv2d(in_channels, v, 3, 1, 1)
-            if batch_norm:
-                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
-            else:
-                layers += [conv2d, nn.ReLU(inplace=True)]
-            in_channels = v
-    return nn.Sequential(*layers)
-
-
-cfgs = {
-    'A': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
-    'B': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
-    'D': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],
-    'E': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
-}
-
-
-def _vgg(arch, cfg, batch_norm, groupable=True, power=0.5, **kwargs):
-    model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm, groupable=groupable, power=power), **kwargs)
-    return model
-
-
-def vgg11(groupable=True, power=0.5, **kwargs):
-    r"""VGG 11-layer model (configuration "A") from
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg11', 'A', False, groupable, power, **kwargs)
-
-
-def vgg11_bn(groupable=True, power=0.5, **kwargs):
-    r"""VGG 11-layer model (configuration "A") with batch normalization
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg11_bn', 'A', True, groupable, power, **kwargs)
-
-
-def vgg13(groupable=True, power=0.5, **kwargs):
-    r"""VGG 13-layer model (configuration "B")
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg13', 'B', False, groupable, power, **kwargs)
-
-
-def vgg13_bn(groupable=True, power=0.5, **kwargs):
-    r"""VGG 13-layer model (configuration "B") with batch normalization
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg13_bn', 'B', True, groupable, power, **kwargs)
-
-
-def vgg16(groupable=True, power=0.5, **kwargs):
-    r"""VGG 16-layer model (configuration "D")
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg16', 'D', False, groupable, power, **kwargs)
-
-
-def vgg16_bn(groupable=True, power=0.5, **kwargs):
-    r"""VGG 16-layer model (configuration "D") with batch normalization
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg16_bn', 'D', True, groupable, power, **kwargs)
-
-
-def vgg19(groupable=True, power=0.5, **kwargs):
-    r"""VGG 19-layer model (configuration "E")
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg19', 'E', False, groupable, power, **kwargs)
-
-
-def vgg19_bn(groupable=True, power=0.5, **kwargs):
-    r"""VGG 19-layer model (configuration 'E') with batch normalization
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_
-    """
-    return _vgg('vgg19_bn', 'E', True, groupable, power, **kwargs)
 
 #####################################################################################
 #####################################################################################
@@ -901,345 +650,3 @@ def densenet201(**kwargs):
           but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
     """
     return _densenet('densenet201', 32, (6, 12, 48, 32), 64, **kwargs)
-
-#####################################################################################
-#####################################################################################
-#### ShuffleNet V1 model for ImageNet
-#####################################################################################
-#####################################################################################
-
-class ShuffleV1Block(nn.Module):
-    def __init__(self, inp, oup, group, first_group, mid_channels, ksize, stride, groupable=True, power=0.5):
-        super(ShuffleV1Block, self).__init__()
-        self.stride = stride
-        assert stride in [1, 2]
-
-        self.mid_channels = mid_channels
-        self.ksize = ksize
-        pad = ksize // 2
-        self.pad = pad
-        self.inp = inp
-        self.group = group
-        self.groupable = groupable
-
-        if stride == 2:
-            outputs = oup - inp
-        else:
-            outputs = oup
-
-        branch_main_1 = [
-            # pw
-            GroupableConv2d(inp, mid_channels, 1, 1, 0, bias=False, power=power) if (groupable and not first_group) \
-            else nn.Conv2d(inp, mid_channels, 1, 1, 0, groups=1 if first_group else group, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            # dw
-            GroupableConv2d(mid_channels, mid_channels, ksize, stride, pad, bias=False, power=power) if groupable \
-            else nn.Conv2d(mid_channels, mid_channels, ksize, stride, pad, groups=mid_channels, bias=False),
-            nn.BatchNorm2d(mid_channels),
-        ]
-        branch_main_2 = [
-            # pw-linear
-            GroupableConv2d(mid_channels, outputs, 1, 1, 0, bias=False, power=power) if groupable \
-            else nn.Conv2d(mid_channels, outputs, 1, 1, 0, groups=group, bias=False),
-            nn.BatchNorm2d(outputs),
-        ]
-        self.branch_main_1 = nn.Sequential(*branch_main_1)
-        self.branch_main_2 = nn.Sequential(*branch_main_2)
-        self.relu = nn.ReLU(inplace=True)
-
-        if stride == 2:
-            self.branch_proj = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
-
-    def forward(self, old_x):
-        x = old_x
-        x_proj = old_x
-        x = self.branch_main_1(x)
-        if (self.group > 1 and not self.groupable):
-            x = self.channel_shuffle(x)
-        x = self.branch_main_2(x)
-        if self.stride == 1:
-            return self.relu(x + x_proj)
-        elif self.stride == 2:
-            return torch.cat((self.branch_proj(x_proj), self.relu(x)), 1)
-
-    def channel_shuffle(self, x):
-        batchsize, num_channels, height, width = x.data.size()
-        assert num_channels % self.group == 0
-        group_channels = num_channels // self.group
-        
-        x = x.reshape(batchsize, group_channels, self.group, height, width)
-        x = x.permute(0, 2, 1, 3, 4)
-        x = x.reshape(batchsize, num_channels, height, width)
-
-        return x
-    
-class ShuffleNetV1(nn.Module):
-    def __init__(self, num_classes=1000, model_size='1.0x', group=8, groupable=True, power=0.5):
-        super(ShuffleNetV1, self).__init__()
-        assert group in [3, 8], "Param::group must be either 3 or 8."
-        assert model_size in ['0.5x', '1.0x', '1.5x', '2.0x'], \
-               "Param::model_size must in ['0.5x', '1.0x', '1.5x', '2.0x']."
-
-        self.stage_repeats = [4, 8, 4]
-        self.model_size = model_size
-        if group == 3:
-            if model_size == '0.5x':
-                self.stage_out_channels = [-1, 12, 120, 240, 480]
-            elif model_size == '1.0x':
-                self.stage_out_channels = [-1, 24, 240, 480, 960]
-            elif model_size == '1.5x':
-                self.stage_out_channels = [-1, 24, 360, 720, 1440]
-            elif model_size == '2.0x':
-                self.stage_out_channels = [-1, 48, 480, 960, 1920]
-        elif group == 8:
-            if model_size == '0.5x':
-                self.stage_out_channels = [-1, 16, 192, 384, 768]
-            elif model_size == '1.0x':
-                self.stage_out_channels = [-1, 24, 384, 768, 1536]
-            elif model_size == '1.5x':
-                self.stage_out_channels = [-1, 24, 576, 1152, 2304]
-            elif model_size == '2.0x':
-                self.stage_out_channels = [-1, 48, 768, 1536, 3072]
-
-        # building first layer
-        input_channel = self.stage_out_channels[1]
-        self.first_conv = nn.Sequential(
-                nn.Conv2d(3, input_channel, 3, 2, 1, bias=False),
-                nn.BatchNorm2d(input_channel),
-                nn.ReLU(inplace=True),
-                )
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        self.features = []
-        for idxstage in range(len(self.stage_repeats)):
-            numrepeat = self.stage_repeats[idxstage]
-            output_channel = self.stage_out_channels[idxstage+2]
-
-            for i in range(numrepeat):
-                stride = 2 if i == 0 else 1
-                first_group = idxstage == 0 and i == 0
-                self.features.append(ShuffleV1Block(input_channel, output_channel,
-                                            group=group, first_group=first_group,
-                                            mid_channels=output_channel // 4, ksize=3,
-                                            stride=stride, groupable=groupable, power=power))
-                input_channel = output_channel
-
-        self.features = nn.Sequential(*self.features)
-
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-
-        self.classifier = nn.Linear(self.stage_out_channels[-1], num_classes, bias=False)
-        self._initialize_weights()
-
-    def forward(self, x):
-        x = self.first_conv(x)
-        x = self.maxpool(x)
-        x = self.features(x)
-
-        x = self.avgpool(x)
-        x = x.contiguous().view(-1, self.stage_out_channels[-1])
-        x = self.classifier(x)
-        return x
-
-    def _initialize_weights(self):
-        for name, m in self.named_modules():
-            if isinstance(m, (nn.Conv2d, GroupableConv2d)):
-                if 'first' in name:
-                    nn.init.normal_(m.weight, 0, 0.01)
-                else:
-                    nn.init.normal_(m.weight, 0, 1.0 / m.weight.shape[1])
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0.0001)
-                nn.init.constant_(m.running_mean, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-def shufflenet_v1(**kwargs):
-    return ShuffleNetV1(**kwargs)
-
-#####################################################################################
-#####################################################################################
-#### ShuffleNet V2 model for ImageNet
-#####################################################################################
-#####################################################################################
-
-def channel_shuffle(x, groups):
-    batchsize, num_channels, height, width = x.data.size()
-    channels_per_group = num_channels // groups
-    
-    # reshape
-    x = x.view(batchsize, groups, channels_per_group, height, width)
-
-    # transpose
-    # - contiguous() required if transpose() is used before view().
-    #   See https://github.com/pytorch/pytorch/issues/764
-    x = torch.transpose(x, 1, 2).contiguous()
-
-    # flatten
-    x = x.view(batchsize, -1, height, width)
-
-    return x
-
-class InvertedResidual(nn.Module):
-    def __init__(self, inp, oup, stride):
-        super(InvertedResidual, self).__init__()
-
-        if not (1 <= stride <= 3):
-            raise ValueError('illegal stride value')
-        self.stride = stride
-
-        branch_features = oup // 2
-        assert (self.stride != 1) or (inp == branch_features << 1)
-
-        if self.stride > 1:
-            self.branch1 = nn.Sequential(
-                self.depthwise_conv(inp, inp, kernel_size=3, stride=self.stride, padding=1),
-                nn.BatchNorm2d(inp),
-                nn.Conv2d(inp, branch_features, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(branch_features),
-                nn.ReLU(inplace=True),
-            )
-
-        self.branch2 = nn.Sequential(
-            nn.Conv2d(inp if (self.stride > 1) else branch_features,
-                      branch_features, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(branch_features),
-            nn.ReLU(inplace=True),
-            self.depthwise_conv(branch_features, branch_features, kernel_size=3, stride=self.stride, padding=1),
-            nn.BatchNorm2d(branch_features),
-            nn.Conv2d(branch_features, branch_features, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(branch_features),
-            nn.ReLU(inplace=True),
-        )
-
-    @staticmethod
-    def depthwise_conv(i, o, kernel_size, stride=1, padding=0, bias=False):
-        return nn.Conv2d(i, o, kernel_size, stride, padding, bias=bias, groups=i)
-
-    def forward(self, x):
-        if self.stride == 1:
-            x1, x2 = x.chunk(2, dim=1)
-            out = torch.cat((x1, self.branch2(x2)), dim=1)
-        else:
-            out = torch.cat((self.branch1(x), self.branch2(x)), dim=1)
-
-        out = channel_shuffle(out, 2)
-
-        return out
-
-
-class ShuffleNetV2(nn.Module):
-    def __init__(self, stages_repeats, stages_out_channels, num_classes=1000):
-        super(ShuffleNetV2, self).__init__()
-
-        if len(stages_repeats) != 3:
-            raise ValueError('expected stages_repeats as list of 3 positive ints')
-        if len(stages_out_channels) != 5:
-            raise ValueError('expected stages_out_channels as list of 5 positive ints')
-        self._stage_out_channels = stages_out_channels
-
-        input_channels = 3
-        output_channels = self._stage_out_channels[0]
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(input_channels, output_channels, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(output_channels),
-            nn.ReLU(inplace=True),
-        )
-        input_channels = output_channels
-
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        stage_names = ['stage{}'.format(i) for i in [2, 3, 4]]
-        for name, repeats, output_channels in zip(
-                stage_names, stages_repeats, self._stage_out_channels[1:]):
-            seq = [InvertedResidual(input_channels, output_channels, 2)]
-            for i in range(repeats - 1):
-                seq.append(InvertedResidual(output_channels, output_channels, 1))
-            setattr(self, name, nn.Sequential(*seq))
-            input_channels = output_channels
-
-        output_channels = self._stage_out_channels[-1]
-        self.conv5 = nn.Sequential(
-            nn.Conv2d(input_channels, output_channels, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(output_channels),
-            nn.ReLU(inplace=True),
-        )
-        
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(output_channels, num_classes)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.maxpool(x)
-        x = self.stage2(x)
-        x = self.stage3(x)
-        x = self.stage4(x)
-        x = self.conv5(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return x
-
-
-def _shufflenetv2(arch, *args, **kwargs):
-    model = ShuffleNetV2(*args, **kwargs)
-    return model
-
-
-def shufflenet_v2_x0_5(**kwargs):
-    """
-    Constructs a ShuffleNetV2 with 0.5x output channels, as described in
-    `"ShuffleNet V2: Practical Guidelines for Efficient CNN Architecture Design"
-    <https://arxiv.org/abs/1807.11164>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _shufflenetv2('shufflenetv2_x0.5', [4, 8, 4], [24, 48, 96, 192, 1024], **kwargs)
-
-
-def shufflenet_v2_x1_0(**kwargs):
-    """
-    Constructs a ShuffleNetV2 with 1.0x output channels, as described in
-    `"ShuffleNet V2: Practical Guidelines for Efficient CNN Architecture Design"
-    <https://arxiv.org/abs/1807.11164>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _shufflenetv2('shufflenetv2_x1.0', [4, 8, 4], [24, 116, 232, 464, 1024], **kwargs)
-
-
-def shufflenet_v2_x1_5(**kwargs):
-    """
-    Constructs a ShuffleNetV2 with 1.5x output channels, as described in
-    `"ShuffleNet V2: Practical Guidelines for Efficient CNN Architecture Design"
-    <https://arxiv.org/abs/1807.11164>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _shufflenetv2('shufflenetv2_x1.5', [4, 8, 4], [24, 176, 352, 704, 1024], **kwargs)
-
-
-def shufflenet_v2_x2_0(**kwargs):
-    """
-    Constructs a ShuffleNetV2 with 2.0x output channels, as described in
-    `"ShuffleNet V2: Practical Guidelines for Efficient CNN Architecture Design"
-    <https://arxiv.org/abs/1807.11164>`_.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return _shufflenetv2('shufflenetv2_x2.0', [4, 8, 4], [24, 244, 488, 976, 2048], **kwargs)

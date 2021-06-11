@@ -9,7 +9,7 @@ This repository contains the official implementation of the structured spasifica
 ## Overview
 
 <figure>
-  <img src="images/overview.png" alt="Overview of structured sparsification" width="720" height="240">
+  <img src="images/overview.png" alt="Overview of structured sparsification" width="720" height="300">
 </figure>
 
 ## Reproduce the Experimental Results
@@ -85,3 +85,41 @@ Finally, under `/your-download-path`, there should be six files:
 ```
 
 You only need these six files to run experiments on ImageNet. Other files are at your disposal.
+
+### Compression Results on ImageNet
+
+Use `train_imagenet.py` file to reproduce our compression results on Imagenet (Table 2 in our [paper](https://arxiv.org/abs/2002.08127)). For example, to compress 35% parameters of ResNet-50, run
+
+```
+# ResNet-50 with 35% parameters pruned
+CUDA_VISIBLE_DEVICES='0,1,2,3,4,5,6,7' python3 -m torch.distributed.launch --nproc_per_node=8 train_imagenet.py \
+                -a "resnet50" \
+                -j "8" \
+                --data "/path/to/rec" \
+                --save-path "results/imagenet-resnet50-prune-0.35" \
+                --batch-size "64" \
+                --epochs "60" \
+                --wd "0." \
+                --warmup "5" \
+                --ft-epochs "120" \
+                --ft-warmup "5" \
+                --prune-percent "0.35"
+```
+
+Here, `-a` specifies the architecture, which can be chosen from `["resnet50", "resnet101", "resnet201"]`, and `--prune-percent` denotes the percent of parameters to be pruned.
+
+Please omit the `--gpu` flag and `CUDA_VISIBLE_DEVICES='0'` prefix if there is no GPU device available.
+
+## Citation
+
+If you find our work intersting or helpful to your research, please consider citing our paper.
+
+```
+@inproceedings{zhang2021structured,
+  title = 	 { Structured Sparsification with Joint Optimization of Group Convolution and Channel Shuffle },
+  author =       {Zhang, Xin-Yu and Zhao, Kai and Xiao, Taihong and Cheng, Ming-Ming and Yang, Ming-Hsuan},
+  booktitle = 	 {Proceedings of The 37th Conference on Uncertainty in Artificial Intelligence},
+  year = 	 {2021}
+ }
+```
+

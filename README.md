@@ -108,8 +108,6 @@ CUDA_VISIBLE_DEVICES='0,1,2,3,4,5,6,7' python3 -m torch.distributed.launch --npr
 
 Here, `-a` specifies the architecture, which can be chosen from `["resnet50", "resnet101", "resnet201"]`, and `--prune-percent` denotes the percent of parameters to be pruned.
 
-Please omit the `--gpu` flag and `CUDA_VISIBLE_DEVICES='0'` prefix if there is no GPU device available.
-
 ## Citation
 
 If you find our work intersting or helpful to your research, please consider citing our paper.

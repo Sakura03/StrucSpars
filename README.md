@@ -63,12 +63,12 @@ Before running the codes, we need to prepare the ImageNet recorder. You have to 
 In order to build the image recorder (See [reference](https://cv.gluon.ai/build/examples_datasets/recordio.html#sphx-glr-download-build-examples-datasets-recordio-py)). Run the following commands:
 ```
 # For training data
-python3 im2rec.py /your-download-path/train /your-download-path/train/ --recursive --list --num-thread 8
-python3 im2rec.py /your-download-path/train /your-download-path/train/ --recursive --pass-through --pack-label --num-thread 8
+python3 imagenet/im2rec.py /your-download-path/train /your-download-path/train/ --recursive --list --num-thread 8
+python3 imagenet/im2rec.py /your-download-path/train /your-download-path/train/ --recursive --pass-through --pack-label --num-thread 8
 
 # For validation data
-python im2rec.py /your-download-path/val /your-download-path/val/ --recursive --list --num-thread 8
-python im2rec.py /your-download-path/val /your-download-path/val/ --recursive --pass-through --pack-label --no-shuffle --num-thread 8
+python3 imagenet/im2rec.py /your-download-path/val /your-download-path/val/ --recursive --list --num-thread 8
+python3 imagenet/im2rec.py /your-download-path/val /your-download-path/val/ --recursive --pass-through --pack-label --no-shuffle --num-thread 8
 ```
 
 P.S. Please make sure that your disk have enough space available, since this operation will copy the whole ImageNet (>=150G will be enough). Besides, absolute path is preferred in the above arguments. Running these commands may take a while.

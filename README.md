@@ -60,7 +60,7 @@ Before running the codes, we need to prepare the ImageNet recorder. You have to 
 │   ├── ...
 ```
 
-In order to build the image recorder (See [reference](https://cv.gluon.ai/build/examples_datasets/recordio.html#sphx-glr-download-build-examples-datasets-recordio-py)). Run the following commands:
+In order to build the image recorder (see [reference](https://cv.gluon.ai/build/examples_datasets/recordio.html#sphx-glr-download-build-examples-datasets-recordio-py)), run the following commands:
 ```
 # For training data
 python3 imagenet/im2rec.py /your-download-path/train /your-download-path/train/ --recursive --list --num-thread 8

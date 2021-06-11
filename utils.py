@@ -1,11 +1,11 @@
 import torch
 import torch.distributed as dist
-from model import GroupableConv2d, get_struc_reg_mat
+from groupconv import GroupableConv2d, get_cost_mat
 
 @torch.no_grad()
 def get_level(matrix, thres):
     matrix = matrix.clone()
-    cost_mat = get_struc_reg_mat(matrix.size(0), matrix.size(1))
+    cost_mat = get_cost_mat(matrix.size(0), matrix.size(1))
     u = torch.unique(cost_mat, sorted=True)
     sums = [torch.sum(matrix).item()]
     for i in range(1, u.size(0)):

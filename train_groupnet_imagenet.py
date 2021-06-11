@@ -2,12 +2,14 @@ import torch, os, argparse, time, warnings
 import numpy as np
 from os.path import join, isfile
 from vlutils import Logger, save_checkpoint, AverageMeter, accuracy, CosAnnealingLR
-import model
+import resnet, densenet
+from groupconv import GroupableConv2d
 from utils import get_struc_reg_mat, get_perm_weight_norm, get_sparsity, get_threshold, synchronize_model, \
                   set_group_levels, update_permutation_matrix, mask_group, real_group, impose_group_lasso
 import torch.nn.functional as F
 from tensorboardX import SummaryWriter
-from thop import profile, count_hooks
+from thop import profile
+from thop.vision.basic_hooks import count_convNd
 # DALI data reader
 from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.ops as ops
@@ -19,10 +21,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 warnings.simplefilter('error')
 
+
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('--print-freq', default=50, type=int, metavar='N', help='print frequency (default: 50)')
-parser.add_argument('-a', '--arch', default='resnet50', type=str, metavar='STR', help='model architecture')
+parser.add_argument('-a', '--arch', type=str, metavar='STR', choices=["resnet50", "resnet101", "densenet201"], help='model architecture')
 parser.add_argument('--data', metavar='DIR', default="./data", help='path to dataset')
 parser.add_argument('--num-classes', default=1000, type=int, metavar='N', help='number of classes')
 parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers')
@@ -122,7 +125,7 @@ if args.local_rank == 0:
     logger = Logger(join(args.save_path, "log.txt"))
 
 # Customized operation for profiling
-custom_ops = {model.GroupableConv2d: count_hooks.count_convNd}
+custom_ops = {GroupableConv2d: count_convNd}
 
 # Set device
 args.gpu = args.local_rank % torch.cuda.device_count()
@@ -153,12 +156,16 @@ def main():
     train_loader_len = int(train_loader._size / args.batch_size)
 
     # Define model and optimizer
-    model_name = "model.%s(num_classes=%d, power=%f)" % (args.arch, args.num_classes, args.decay_factor)
-    model = eval(model_name).to(local_device)
+    prefix = "resnet." if "resnet" in args.arch else "densenet."
+    model_name = prefix + "%s(num_classes=%d, power=%f)" % (args.arch, args.num_classes, args.decay_factor)
+    model = eval(model_name)
+    model.to(local_device)
     if args.local_rank == 0:
+        m = eval(model_name).to(local_device)
         logger.info("Model details:")
-        logger.info(model)
-        flops, params = profile(model, inputs=(torch.randn(1, 3, 224, 224).to(local_device),), custom_ops=custom_ops, verbose=False)
+        logger.info(m)
+        flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).to(local_device),), custom_ops=custom_ops, verbose=False)
+        del m
         tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
         tfboard_writer.add_scalar("train/Params", params, global_step=-1)
     model = DDP(model, device_ids=[args.local_rank])
@@ -361,7 +368,7 @@ def main():
             tfboard_writer.add_scalar('finetune/loss', loss, epoch)
             tfboard_writer.add_scalar('finetune/acc1', acc1, epoch)
             tfboard_writer.add_scalar('finetune/acc5', acc5, epoch)
-            
+
 
 def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetune=False):
     if args.local_rank == 0:

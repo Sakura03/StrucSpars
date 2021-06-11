@@ -59,7 +59,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
@@ -127,12 +127,12 @@ class CosAnnealingLR(object):
 
         assert self.last_epoch >= -1
         self.iter_counter = (self.last_epoch+1) * loader_len
-        self.lr = 0 
-    
+        self.lr = 0
+
     def restart(self, lr_max=None):
         if lr_max:
             self.lr_max = lr_max
-        self.iter_counter = 0 
+        self.iter_counter = 0
 
     def step(self):
         self.iter_counter += 1

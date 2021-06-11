@@ -113,11 +113,11 @@ Here, `-a` specifies the architecture, which can be chosen from `["resnet50", "r
 If you find our work intersting or helpful to your research, please consider citing our paper.
 
 ```
-@inproceedings{zhang2021structured,
-  title = 	 { Structured Sparsification with Joint Optimization of Group Convolution and Channel Shuffle },
-  author =       {Zhang, Xin-Yu and Zhao, Kai and Xiao, Taihong and Cheng, Ming-Ming and Yang, Ming-Hsuan},
-  booktitle = 	 {Proceedings of The 37th Conference on Uncertainty in Artificial Intelligence},
-  year = 	 {2021}
- }
+ @article{zhang2021structured,
+  title={Structured Sparsification with Joint Optimization of Group Convolution and Channel Shuffle},
+  author={Zhang, Xin-Yu and Zhao, Kai and Xiao, Taihong and Cheng, Ming-Ming and Yang, Ming-Hsuan},
+  journal={arXiv preprint arXiv:2002.08127},
+  year={2021}
+}
 ```
 

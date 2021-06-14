@@ -1,2 +1,9 @@
+*.ipynb_checkpoints*
+.idea/
+data/
+models/
+logs/
+samples/
 __pycache__/
 results/
+

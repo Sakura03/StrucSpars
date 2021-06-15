@@ -484,7 +484,7 @@ def validate(val_loader, model):
             losses.update(loss.item(), image.size(0))
             top1.update(acc1.item(), image.size(0))
             top5.update(acc5.item(), image.size(0))
-        del prediction, loss, top1, top5
+        del prediction, loss, acc1, acc5
         torch.cuda.empty_cache()
 
         # Log validation info

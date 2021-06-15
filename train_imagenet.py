@@ -415,7 +415,6 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         loss = reduce_tensor(loss)
         top1 = reduce_tensor(top1)
         top5 = reduce_tensor(top5)
-        torch.cuda.empty_cache()
 
         # Update AverageMeter stats
         if args.local_rank == 0:
@@ -424,6 +423,8 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             losses.update(loss.item(), image.size(0))
             acc1.update(top1.item(), image.size(0))
             acc5.update(top5.item(), image.size(0))
+        del prediction, loss, top1, top5
+        torch.cuda.empty_cache()
         # torch.cuda.synchronize()
 
         # Update permutation matrices P and Q per 500 iters
@@ -476,17 +477,20 @@ def validate(val_loader, model):
         loss = reduce_tensor(loss)
         acc1 = reduce_tensor(acc1)
         acc5 = reduce_tensor(acc5)
-        torch.cuda.empty_cache()
 
         # Update meters and log info
         if args.local_rank == 0:
             losses.update(loss.item(), image.size(0))
             top1.update(acc1.item(), image.size(0))
             top5.update(acc5.item(), image.size(0))
-            if i % args.print_freq == 0:
-                logger.info('Test: [{0}/{1}] Test Loss {loss.val:.3f} (avg={loss.avg:.3f}) '
-                            'Acc1 {top1.val:.3f} (avg={top1.avg:.3f}) Acc5 {top5.val:.3f} (avg={top5.avg:.3f})' \
-                            .format(i, val_loader_len, loss=losses, top1=top1, top5=top5))
+        del prediction, loss, top1, top5
+        torch.cuda.empty_cache()
+
+        # Log validation info
+        if i % args.print_freq == 0 and args.local_rank == 0:
+            logger.info('Test: [{0}/{1}] Test Loss {loss.val:.3f} (avg={loss.avg:.3f}) '
+                        'Acc1 {top1.val:.3f} (avg={top1.avg:.3f}) Acc5 {top5.val:.3f} (avg={top5.avg:.3f})' \
+                        .format(i, val_loader_len, loss=losses, top1=top1, top5=top5))
 
     if args.local_rank == 0:
         logger.info(' * Prec@1 {top1.avg:.5f} Prec@5 {top5.avg:.5f}'.format(top1=top1, top5=top5))

@@ -202,11 +202,12 @@ def main():
         # Log initial group info
         weight_norm = get_perm_weight_norm(model.module)
         struc_reg = get_struc_reg_mat(model.module)
-        for k in weight_norm.keys():
-            wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
-            sr = struc_reg[k]
-            canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr.to(device=wn.device)), dim=1)
-            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-2)
+        with torch.no_grad():
+            for k in weight_norm.keys():
+                wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
+                sr = struc_reg[k]
+                canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr.to(device=wn.device)), dim=1)
+                tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-2)
         # Initially update permutation matrices P and Q
         update_permutation_matrix(model, iters=50)
 
@@ -218,16 +219,18 @@ def main():
         weight_norm = get_perm_weight_norm(model.module)
         struc_reg = get_struc_reg_mat(model.module)
         last_sparsity = get_sparsity(weight_norm, thres=args.sparse_thres)
-        for k in weight_norm.keys():
-            wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
-            sr = struc_reg[k]
-            canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr), dim=1)
-            tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-1)
+        with torch.no_grad():
+            for k in weight_norm.keys():
+                wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
+                sr = struc_reg[k]
+                canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr), dim=1)
+                tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=-1)
 
     struc_reg_coeff = args.delta_lambda
     for epoch in range(args.start_epoch, args.epochs):
         # Train and evaluate
-        loss = train(train_loader, model, optimizer, None, epoch, l1lambda=struc_reg_coeff if epoch >= args.warmup else 0.0)
+        cur_reg_coeff = struc_reg_coeff if epoch >= args.warmup else 0.0
+        loss = train(train_loader, model, optimizer, None, epoch, l1lambda=cur_reg_coeff)
         acc1, acc5 = validate(val_loader, model)
 
         if args.local_rank == 0:
@@ -269,11 +272,12 @@ def main():
             tfboard_writer.add_scalar('train/L1-coefficient', struc_reg_coeff, epoch)
             tfboard_writer.add_scalar('test/acc1', acc1, epoch)
             tfboard_writer.add_scalar('test/acc5', acc5, epoch)
-            for k in weight_norm.keys():
-                wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
-                sr = struc_reg[k]
-                canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr), dim=1)
-                tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=epoch)
+            with torch.no_grad():
+                for k in weight_norm.keys():
+                    wn = weight_norm[k] / (weight_norm[k].max() + 1e-8)
+                    sr = struc_reg[k]
+                    canvas = torch.cat((wn, torch.ones(wn.size(0), wn.size(1)//4).to(device=wn.device), sr), dim=1)
+                    tfboard_writer.add_image("train/%s" % k, canvas.unsqueeze(0), global_step=epoch)
 
             # Adjust coefficient of L1 regularization
             target_sparsity = args.prune_percent
@@ -288,7 +292,7 @@ def main():
                 elif model_sparsity >= target_sparsity:
                     struc_reg_coeff -= args.delta_lambda
                 struc_reg_coeff = max(struc_reg_coeff, 0)
-            logger.info("Model sparsity=%f (last=%f, target=%f), coefficient=%f" % (model_sparsity, last_sparsity, target_sparsity, struc_reg_coeff))
+            logger.info("Model sparsity=%f (last=%f, target=%f), coefficient=%f" % (model_sparsity, last_sparsity, target_sparsity, cur_reg_coeff))
             last_sparsity = model_sparsity
 
         # Broadcast to other workers

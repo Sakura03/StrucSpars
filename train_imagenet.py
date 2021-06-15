@@ -166,6 +166,7 @@ def main():
         logger.info(m)
         flops, params = profile(m, inputs=(torch.randn(1, 3, 224, 224).to(local_device),), custom_ops=custom_ops, verbose=False)
         del m
+        torch.cuda.empty_cache()
         tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
         tfboard_writer.add_scalar("train/Params", params, global_step=-1)
     model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)

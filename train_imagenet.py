@@ -158,8 +158,8 @@ def main():
     # Define model and optimizer
     prefix = "resnet." if "resnet" in args.arch else "densenet."
     model_name = prefix + "%s(num_classes=%d, power=%f)" % (args.arch, args.num_classes, args.decay_factor)
-    model = eval(model_name)
-    model.to(local_device)
+    model = eval(model_name).to(local_device)
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     if args.local_rank == 0:
         m = eval(model_name).to(local_device)
         logger.info("Model details:")
@@ -168,7 +168,7 @@ def main():
         del m
         tfboard_writer.add_scalar("train/FLOPs", flops, global_step=-1)
         tfboard_writer.add_scalar("train/Params", params, global_step=-1)
-    model = DDP(model, device_ids=[args.local_rank])
+    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     if args.local_rank == 0:
         logger.info("Optimizer details:")

@@ -32,7 +32,7 @@ One can simply run `train_cifar.py` to reproduce the compression results on CIFA
 ```
 CUDA_VISIBLE_DEVICES='0' python3 train_cifar.py -a "resnet20" --data "./data" --dataset "cifar10" --save-path "results/cifar10-resnet20-prune-percent-0.4" --prune-percent "0.4"
 ```
-Here, one can specify the GPU id with `CUDA_VISIBLE_DEVICES`, and one GPU is sufficient in most cases. `-a` is the interface of specifying network architecture, and one can set the percent of parameters to prune via `--prune-percent`.
+Here, one can specify the GPU id with `CUDA_VISIBLE_DEVICES`, and one GPU is sufficient in most cases. `-a` specifies the architecture, which can be chosen from `["resnet20", "resnet56", "resnet110"]`, and `--prune-percent` denotes the percent of parameters to be pruned.
 
 ### Compression Results on ImageNet
 
@@ -104,21 +104,15 @@ Use `train_imagenet.py` file to reproduce our compression results on Imagenet (T
 
 ```
 # ResNet-50 with 35% parameters pruned
-CUDA_VISIBLE_DEVICES='0,1,2,3,4,5,6,7' python3 -m torch.distributed.launch --nproc_per_node=8 train_imagenet.py \
+CUDA_VISIBLE_DEVICES='0,1,2,3' python3 -m torch.distributed.launch --nproc_per_node=4 train_imagenet.py \
                 -a "resnet50" \
-                -j "8" \
+                -j "4" \
                 --data "/path/to/rec" \
                 --save-path "results/imagenet-resnet50-prune-0.35" \
                 --batch-size "64" \
-                --epochs "60" \
-                --wd "0." \
-                --warmup "5" \
-                --ft-epochs "120" \
-                --ft-warmup "5" \
                 --prune-percent "0.35"
 ```
-
-Here, `-a` specifies the architecture, which can be chosen from `["resnet50", "resnet101", "resnet201"]`, and `--prune-percent` denotes the percent of parameters to be pruned.
+Here, the arguments `-a` and `--prune-percent` have the same meaning as in the CIFAR experiments. One can choose an architecture from `["resnet50", "resnet101", "densenet201"]`.
 
 ## Citation
 

@@ -112,6 +112,38 @@ def cifar100(path='data/cifar100', bs=256, num_workers=8):
     return train_loader, test_loader
 
 
+class MultiStepLR(object):
+    def __init__(self, loader_len, milestones, gamma, base_lr=0.1, warmup_epochs=0, last_epoch=-1):
+        assert isinstance(milestones, list)
+
+        self.warmup_iters = warmup_epochs * loader_len
+        self.loader_len = loader_len
+        self.base_lr = base_lr
+        self.lr = base_lr
+        self.milestones = milestones
+        self.gamma = gamma
+        self.last_epoch = last_epoch
+
+        assert self.last_epoch >= -1
+        self.iter_counter = (self.last_epoch+1) * loader_len
+        self.milestone_counter = 0
+
+    def restart(self, base_lr=None):
+        if base_lr:
+            self.base_lr = base_lr
+        self.iter_counter = 0
+
+    def step(self):
+        self.iter_counter += 1
+        if self.warmup_iters > 0 and self.iter_counter <= self.warmup_iters:
+            return float(self.iter_counter / self.warmup_iters) * self.base_lr
+        else:
+            if self.milestone_counter < len(self.milestones) and self.iter_counter == self.milestones[self.milestone_counter] * self.loader_len:
+                self.lr *= self.gamma
+                self.milestone_counter += 1
+            return self.lr
+
+
 class CosAnnealingLR(object):
     def __init__(self, loader_len, epochs, lr_max, warmup_epochs=0, last_epoch=-1):
         max_iters = loader_len * epochs

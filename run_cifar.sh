@@ -1,16 +1,1 @@
-CUDA_VISIBLE_DEVICES=0 python3 train_groupnet_cifar.py --depth "20" \
-                                                       --data "./data" \
-                                                       --tmp "results/cifar100-resnet20-delta-lambda2e-6-thres0.1-power0.5-warmup10-wd0-percent0.4-adjust-lambda" \
-                                                       --batch-size "64" \
-                                                       --fix-lr \
-                                                       --epochs "100" \
-                                                       --wd "0." \
-                                                       --sparsity "2e-6" \
-                                                       --delta-lambda "2e-6" \
-                                                       --adjust-lambda \
-                                                       --sparse-thres "0.1" \
-                                                       --power "0.5" \
-                                                       --warmup "10" \
-                                                       --percent "0.4" \
-                                                       --init-iters "20" \
-                                                       --epoch-iters "5"
+CUDA_VISIBLE_DEVICES='0' python3 train_cifar.py -a "resnet20" --data "./data" --dataset "cifar10" --save-path "results/cifar10-resnet20-prune-percent-0.4" --prune-percent "0.4"

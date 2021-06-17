@@ -390,7 +390,6 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
         target = data[0]["label"].squeeze().to(local_device).long()
         if args.local_rank == 0:
             start = time.time()
-            # data_time.update(time.time() - end)
 
         # Compute the learning rate
         if scheduler is not None:

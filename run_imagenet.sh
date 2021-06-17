@@ -4,9 +4,4 @@ CUDA_VISIBLE_DEVICES='0,1,2,3' python3 -m torch.distributed.launch --nproc_per_n
                 --data "/mnt/truenas/scratch/hzh/datasets/imagenet_rec" \
                 --save-path "results/imagenet-resnet50-prune-percent-0.35" \
                 --batch-size "64" \
-                --epochs "60" \
-                --wd "0." \
-                --warmup "5" \
-                --ft-epochs "120" \
-                --ft-warmup "5" \
                 --prune-percent "0.35"

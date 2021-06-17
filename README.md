@@ -112,7 +112,7 @@ CUDA_VISIBLE_DEVICES='0,1,2,3' python3 -m torch.distributed.launch --nproc_per_n
                 --batch-size "64" \
                 --prune-percent "0.35"
 ```
-Here, the arguments `-a` and `--prune-percent` have the same meaning as in the CIFAR experiments. One can choose an architecture from `["resnet50", "resnet101", "densenet201"]`.
+Here, the arguments `-a` and `--prune-percent` have the same meaning as in the CIFAR experiments. One can choose an architecture from `["resnet50", "resnet101", "densenet201"]`. Notably. the argument `--batch-size` denotes the number of training examples **per GPU** in each batch. If the number of GPUs used for training is changed, the number passed to `--batch-size` should be adapted accordingly.
 
 ## Citation
 

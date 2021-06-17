@@ -441,7 +441,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, l1lambda=0., finetun
             logger.info('Ep[{0}/{1}] It[{2}/{3}] Bt {batch_time.avg:.3f} Dt {data_time.avg:.3f} '
                         'Loss {loss.val:.3f} ({loss.avg:.3f}) Acc1 {top1.val:.3f} ({top1.avg:.3f}) '
                         'Acc5 {top5.val:.3f} ({top5.avg:.3f}) LR {lr:.3E} L1 {l1:.2E}'.format(
-                                epoch, args.finetune_epochs if finetune else args.epochs,
+                                epoch, args.ft_epochs if finetune else args.epochs,
                                 i, train_loader_len, batch_time=batch_times, data_time=data_times,
                                 loss=losses, top1=acc1, top5=acc5, lr=lr, l1=l1lambda
                         ))

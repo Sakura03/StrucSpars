@@ -14,7 +14,7 @@ This repository contains the official implementation of the structured spasifica
 
 ## Reproduce the Experimental Results
 
-### Prerequisite
+### Dependencies
 
 Please make sure the following packages are installed in your environment:
 
@@ -26,7 +26,19 @@ Please make sure the following packages are installed in your environment:
 | thop           |  ==0.0.31.post2005241907 |
 | POT            |  ==0.7.0                 |
 
-Besides, our ImageNet experiment is based on the [NVIDIA-DALI](https://docs.nvidia.com/deeplearning/dali/user-guide/docs/) pipeline. Please use the following script to install DALI:
+### Compression Results on CIFAR
+
+One can simply run `train_cifar.py` to reproduce the compression results on CIFAR classification benchmark (Table 1 in our [paper](https://arxiv.org/abs/2002.08127)). An exemplary script is given below:
+```
+CUDA_VISIBLE_DEVICES='0' python3 train_cifar.py -a "resnet20" --data "./data" --dataset "cifar10" --save-path "results/cifar10-resnet20-prune-percent-0.4" --prune-percent "0.4"
+```
+Here, one can specify the GPU id with `CUDA_VISIBLE_DEVICES`, and one GPU is sufficient in most cases. `-a` is the interface of specifying network architecture, and one can set the percent of parameters to prune via `--prune-percent`.
+
+### Compression Results on ImageNet
+
+#### Extra Dependency and Dataset Preparation
+
+Our ImageNet experiment is based on the [NVIDIA-DALI](https://docs.nvidia.com/deeplearning/dali/user-guide/docs/) pipeline. Please use the following script to install DALI:
 ```
 pip3 install --extra-index-url https://developer.download.nvidia.com/compute/redist/cuda/10.0 nvidia-dali==0.13.0
 ```
@@ -86,7 +98,7 @@ Finally, under `/your-download-path`, there should be six files:
 
 You only need these six files to run experiments on ImageNet. Other files are at your disposal.
 
-### Compression Results on ImageNet
+#### Code Usage
 
 Use `train_imagenet.py` file to reproduce our compression results on Imagenet (Table 2 in our [paper](https://arxiv.org/abs/2002.08127)). For example, to compress 35% parameters of ResNet-50, run
 

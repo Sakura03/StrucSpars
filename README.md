@@ -119,11 +119,11 @@ Here, the arguments `-a` and `--prune-percent` have the same meaning as in the C
 If you find our work intersting or helpful to your research, please consider citing our paper.
 
 ```
- @article{zhang2021structured,
-  title={Structured Sparsification with Joint Optimization of Group Convolution and Channel Shuffle},
-  author={Zhang, Xin-Yu and Zhao, Kai and Xiao, Taihong and Cheng, Ming-Ming and Yang, Ming-Hsuan},
-  journal={arXiv preprint arXiv:2002.08127},
-  year={2021}
+@InProceedings{zhang2021structured,
+    title = {Structured Sparsification with Joint Optimization of Group Convolution and Channel Shuffle},
+    author = {Zhang, Xin-Yu and Zhao, Kai and Xiao, Taihong and Cheng, Ming-Ming and Yang, Ming-Hsuan},
+    booktitle = {Proceedings of the 37th Conference on Uncertainty in Artificial Intelligence (UAI)},
+    year = {2021}
 }
 ```
 
